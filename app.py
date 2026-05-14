@@ -598,11 +598,12 @@ with tabs[0]:
     # EXPORT
     st.markdown('<div class="section-title">Exportar Resumen</div>', unsafe_allow_html=True)
     resumen_export = pd.DataFrame([{
-        "Métrica": "Inventario Auditado", "Valor": fmt_money(inv)
-    },{"Métrica": "Faltantes PVP", "Valor": fmt_money(falt)
-    },{"Métrica": "Sobrantes PVP", "Valor": fmt_money(sobr)
-    },{"Métrica": "Resultado Neto PVP", "Valor": fmt_money(neto)
-    },{"Métrica": "A Cobrar PVP", "Valor": fmt_money(cobrar)
+        "Métrica": "Inventario Auditado (Costo)", "Valor": fmt_money(inv)
+    },{"Métrica": "A Cobrar (Costo)", "Valor": fmt_money(cobrar_c)
+    },{"Métrica": "Costo Neto Total", "Valor": fmt_money(neto_c)
+    },{"Métrica": "Faltantes", "Valor": fmt_money(falt_c)
+    },{"Métrica": "Sobrantes", "Valor": fmt_money(sobr_c)
+    },{"Métrica": "Mal Estado / Caducados", "Valor": fmt_money(mal_est)
     },{"Métrica": "Auditorías", "Valor": n_aud
     },{"Métrica": "Riesgo Crítico+Alto", "Valor": n_crit + n_alto
     },{"Métrica": "Score Promedio", "Valor": f"{score_avg:.1f}"
@@ -620,7 +621,7 @@ with tabs[1]:
     aud_agg = dff.groupby("AUDITOR").agg(
         auditorias=("No.","count"), faltantes=("FALTANTES PVP","sum"),
         sobrantes=("SOBRANTES PVP","sum"), result_neto=("RESULT. NETO PVP","sum"),
-        cobrar=("RESULT. A COBRAR PVP","sum"), score_prom=("SCORE (0/100)","mean"),
+        cobrar=("RESULT. A COBRAR COSTO","sum"), score_prom=("SCORE (0/100)","mean"),
         dias_resp=("DÍAS RESPUESTA","mean")
     ).reset_index().sort_values("auditorias", ascending=False)
 
@@ -672,17 +673,17 @@ with tabs[1]:
 
     st.markdown('<div class="section-title">Tabla Resumen por Auditor</div>', unsafe_allow_html=True)
     tabla_aud = aud_agg.copy()
-    tabla_aud.columns = ["Auditor","Auditorías","Faltantes PVP","Sobrantes PVP",
-                          "Result. Neto PVP","A Cobrar PVP","Score Prom.","Días Respuesta"]
-    for col in ["Faltantes PVP","Sobrantes PVP","Result. Neto PVP","A Cobrar PVP"]:
+    tabla_aud.columns = ["Auditor","Auditorías","Faltantes","Sobrantes",
+                          "Costo Neto","A Cobrar Costo","Score Prom.","Días Respuesta"]
+    for col in ["Faltantes","Sobrantes","Costo Neto","A Cobrar Costo"]:
         tabla_aud[col] = tabla_aud[col].apply(fmt_money)
     tabla_aud["Score Prom."]     = tabla_aud["Score Prom."].round(1)
     tabla_aud["Días Respuesta"]  = tabla_aud["Días Respuesta"].round(1)
     tot_aud = pd.DataFrame([{"Auditor":"TOTAL","Auditorías":tabla_aud["Auditorías"].sum(),
         "Faltantes PVP":fmt_money(aud_agg["faltantes"].sum()),
         "Sobrantes PVP":fmt_money(aud_agg["sobrantes"].sum()),
-        "Result. Neto PVP":fmt_money(aud_agg["result_neto"].sum()),
-        "A Cobrar PVP":fmt_money(aud_agg["cobrar"].sum()),
+        "Costo Neto":fmt_money(aud_agg["result_neto"].sum()),
+        "A Cobrar Costo":fmt_money(aud_agg["cobrar"].sum()),
         "Score Prom.":round(aud_agg["score_prom"].mean(),1),
         "Días Respuesta":round(aud_agg["dias_resp"].mean(),1)}])
     tabla_aud_full = pd.concat([tabla_aud, tot_aud], ignore_index=True)
@@ -699,7 +700,7 @@ with tabs[2]:
     linea_agg = dff.groupby("LÍNEA").agg(
         auditorias=("No.","count"), inv_total=("TOTAL INVENTARIO COSTO","sum"),
         faltantes=("FALTANTES PVP","sum"), sobrantes=("SOBRANTES PVP","sum"),
-        result_neto=("RESULT. NETO PVP","sum"), cobrar=("RESULT. A COBRAR PVP","sum"),
+        result_neto=("RESULT. A COBRAR COSTO","sum"), cobrar=("RESULT. A COBRAR COSTO","sum"),
         score_prom=("SCORE (0/100)","mean"),
     ).reset_index().sort_values("result_neto")
 
@@ -738,17 +739,17 @@ with tabs[2]:
         st.plotly_chart(fig2, use_container_width=True)
 
     tabla_linea = linea_agg.copy()
-    tabla_linea.columns = ["Línea","Auditorías","Inv. Total","Faltantes PVP",
-                            "Sobrantes PVP","Result. Neto PVP","A Cobrar PVP","Score Prom."]
-    for col in ["Inv. Total","Faltantes PVP","Sobrantes PVP","Result. Neto PVP","A Cobrar PVP"]:
+    tabla_linea.columns = ["Línea","Auditorías","Inv. Total","Faltantes",
+                            "Sobrantes","A Cobrar Costo","Costo Neto","Score Prom."]
+    for col in ["Inv. Total","Faltantes","Sobrantes","A Cobrar Costo","Costo Neto"]:
         tabla_linea[col] = tabla_linea[col].apply(fmt_money)
     tabla_linea["Score Prom."] = tabla_linea["Score Prom."].round(1)
     tot_lin = pd.DataFrame([{"Línea":"TOTAL","Auditorías":linea_agg["auditorias"].sum(),
         "Inv. Total":fmt_money(linea_agg["inv_total"].sum()),
         "Faltantes PVP":fmt_money(linea_agg["faltantes"].sum()),
         "Sobrantes PVP":fmt_money(linea_agg["sobrantes"].sum()),
-        "Result. Neto PVP":fmt_money(linea_agg["result_neto"].sum()),
-        "A Cobrar PVP":fmt_money(linea_agg["cobrar"].sum()),
+        "A Cobrar Costo":fmt_money(linea_agg["result_neto"].sum()),
+        "Costo Neto":fmt_money(linea_agg["cobrar"].sum()),
         "Score Prom.":round(linea_agg["score_prom"].mean(),1)}])
     tabla_linea_full = pd.concat([tabla_linea, tot_lin], ignore_index=True)
     st.dataframe(tabla_linea_full, use_container_width=True, hide_index=True)
@@ -834,8 +835,8 @@ with tabs[4]:
 
     t_inv    = tienda_df["TOTAL INVENTARIO COSTO"].sum()
     t_falt   = tienda_df["FALTANTES PVP"].sum()
-    t_neto   = tienda_df["RESULT. NETO PVP"].sum()
-    t_cobrar = tienda_df["RESULT. A COBRAR PVP"].sum()
+    t_cobrar = pd.to_numeric(tienda_df.get("RESULT. A COBRAR COSTO", 0), errors="coerce").fillna(0).sum()
+    t_neto   = pd.to_numeric(tienda_df.get("TOTAL COSTO NETO",       0), errors="coerce").fillna(0).sum()
     t_score  = tienda_df["SCORE (0/100)"].mean()
     t_riesgo = tienda_df["RIESGO_NORM"].iloc[-1] if len(tienda_df) > 0 else "-"
     t_zona   = tienda_df["ZONA"].iloc[0]  if len(tienda_df) > 0 else "-"
@@ -844,8 +845,8 @@ with tabs[4]:
 
     c1,c2,c3,c4 = st.columns(4)
     c1.markdown(f'<div class="kpi-card" style="border-top-color:{C_BLUE}"><div class="kpi-label">Inventario Auditado</div><div class="kpi-value neu">{fmt_money(t_inv)}</div><div class="kpi-sub">{t_zona} · {t_linea}</div></div>', unsafe_allow_html=True)
-    c2.markdown(f'<div class="kpi-card" style="border-top-color:{C_RED}"><div class="kpi-label">Faltantes PVP</div><div class="kpi-value neg">{fmt_money(t_falt)}</div><div class="kpi-sub">{len(tienda_df)} auditoría(s)</div></div>', unsafe_allow_html=True)
-    c3.markdown(f'<div class="kpi-card" style="border-top-color:{C_AMBER}"><div class="kpi-label">Resultado Neto PVP</div><div class="kpi-value neg">{fmt_money(t_neto)}</div><div class="kpi-sub">A cobrar: {fmt_money(t_cobrar)}</div></div>', unsafe_allow_html=True)
+    c2.markdown(f'<div class="kpi-card" style="border-top-color:{C_RED}"><div class="kpi-label">A Cobrar (Costo)</div><div class="kpi-value neg">{fmt_money(t_cobrar)}</div><div class="kpi-sub">{len(tienda_df)} auditoría(s)</div></div>', unsafe_allow_html=True)
+    c3.markdown(f'<div class="kpi-card" style="border-top-color:{C_AMBER}"><div class="kpi-label">Costo Neto</div><div class="kpi-value neg">{fmt_money(t_neto)}</div><div class="kpi-sub">Faltantes: {fmt_money(t_falt)}</div></div>', unsafe_allow_html=True)
     c4.markdown(f'<div class="kpi-card" style="border-top-color:{rcolor}"><div class="kpi-label">Score de Riesgo</div><div class="kpi-value" style="color:{rcolor}">{t_score:.1f} / 100</div><div class="kpi-sub">Clasificación: {t_riesgo}</div></div>', unsafe_allow_html=True)
 
     col_g, col_c = st.columns([2,1])
@@ -894,16 +895,16 @@ with tabs[4]:
                           "RESULT. NETO PVP","RESULT. A COBRAR PVP",
                           "SCORE (0/100)","RIESGO_NORM","OBSERVACIONES"]].copy()
     tabla_t["FECHA AUDITORÍA"] = tabla_t["FECHA AUDITORÍA"].dt.strftime("%d/%m/%Y")
-    for col in ["TOTAL INVENTARIO COSTO","FALTANTES PVP","SOBRANTES PVP","RESULT. NETO PVP","RESULT. A COBRAR PVP"]:
+    for col in ["TOTAL INVENTARIO COSTO","FALTANTES PVP","SOBRANTES PVP","RESULT. A COBRAR COSTO","TOTAL COSTO NETO"]:
         tabla_t[col] = tabla_t[col].apply(fmt_money)
-    tabla_t.columns = ["Ref. Informe","Fecha","Auditor","Inventario","Faltantes PVP",
-                        "Sobrantes PVP","Result. Neto","A Cobrar","Score","Riesgo","Observaciones"]
+    tabla_t.columns = ["Ref. Informe","Fecha","Auditor","Inventario","Faltantes",
+                        "Sobrantes","A Cobrar Costo","Costo Neto","Score","Riesgo","Observaciones"]
     tot_t = pd.DataFrame([{"Ref. Informe":"TOTAL","Fecha":"—","Auditor":"—",
         "Inventario":fmt_money(tienda_df["TOTAL INVENTARIO COSTO"].sum()),
-        "Faltantes PVP":fmt_money(tienda_df["FALTANTES PVP"].sum()),
-        "Sobrantes PVP":fmt_money(tienda_df["SOBRANTES PVP"].sum()),
-        "Result. Neto":fmt_money(tienda_df["RESULT. NETO PVP"].sum()),
-        "A Cobrar":fmt_money(tienda_df["RESULT. A COBRAR PVP"].sum()),
+        "Faltantes":fmt_money(tienda_df["FALTANTES PVP"].sum()),
+        "Sobrantes":fmt_money(tienda_df["SOBRANTES PVP"].sum()),
+        "A Cobrar Costo":fmt_money(pd.to_numeric(tienda_df.get("RESULT. A COBRAR COSTO",0),errors="coerce").fillna(0).sum()),
+        "Costo Neto":fmt_money(pd.to_numeric(tienda_df.get("TOTAL COSTO NETO",0),errors="coerce").fillna(0).sum()),
         "Score":round(tienda_df["SCORE (0/100)"].mean(),1),"Riesgo":"—","Observaciones":"—"}])
     tabla_t_full = pd.concat([tabla_t, tot_t], ignore_index=True)
     st.dataframe(tabla_t_full, use_container_width=True, hide_index=True)
@@ -1380,9 +1381,12 @@ with tabs[8]:
             cobrado=("VALOR COBRADO","sum")
         ).reset_index().sort_values("MES")
         fig_mc = go.Figure()
-        fig_mc.add_bar(x=mes_cobro["MES"], y=mes_cobro["cobrar"].abs(),
+        mes_cobro2 = mes_cobro.merge(
+            dff[["MES","MES_LABEL"]].drop_duplicates("MES"), on="MES", how="left"
+        ).sort_values("MES")
+        fig_mc.add_bar(x=mes_cobro2["MES_LABEL"], y=mes_cobro2["cobrar"].abs(),
                        name="A cobrar", marker_color=C_RED, opacity=0.8)
-        fig_mc.add_bar(x=mes_cobro["MES"], y=mes_cobro["cobrado"],
+        fig_mc.add_bar(x=mes_cobro2["MES_LABEL"], y=mes_cobro2["cobrado"],
                        name="Cobrado", marker_color=C_GREEN, opacity=0.8)
         fig_mc.update_layout(
             barmode="group", height=280, plot_bgcolor="white", paper_bgcolor="white",
