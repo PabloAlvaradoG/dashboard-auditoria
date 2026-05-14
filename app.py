@@ -164,7 +164,8 @@ def load_data(file_bytes: bytes, config_bytes: bytes = None):
     df = df.dropna(subset=["No."])
 
     num_cols = ["TOTAL INVENTARIO COSTO","FALTANTES PVP","SOBRANTES PVP",
-                "RESULT. NETO PVP","RESULT. A COBRAR PVP","MAL ESTADO CADUCADOS PVP",
+                "RESULT. NETO PVP","RESULT. A COBRAR PVP","RESULT. A COBRAR COSTO",
+                "TOTAL COSTO NETO","MAL ESTADO CADUCADOS PVP",
                 "DIF. CRUCES PVP","SCORE (0/100)","DEFECTOS FÁBRICA PVP","OTROS PVP"]
     for c in num_cols:
         if c in df.columns:
@@ -173,6 +174,7 @@ def load_data(file_bytes: bytes, config_bytes: bytes = None):
     df["FECHA AUDITORÍA"] = pd.to_datetime(df["FECHA AUDITORÍA"], errors="coerce")
     df["FECHA ENVÍO"]     = pd.to_datetime(df["FECHA ENVÍO"],     errors="coerce")
     df["MES"]             = df["FECHA AUDITORÍA"].dt.to_period("M").astype(str)
+    df["MES_LABEL"]       = df["FECHA AUDITORÍA"].dt.strftime("%b %Y")
     df["DÍAS RESPUESTA"]  = (df["FECHA ENVÍO"] - df["FECHA AUDITORÍA"]).dt.days.fillna(0)
 
     # Normalizar auditores — FIX: unifica variantes del mismo nombre
@@ -529,52 +531,65 @@ tabs = st.tabs([
 with tabs[0]:
     st.markdown('<div class="section-title">Indicadores Clave</div>', unsafe_allow_html=True)
 
-    inv     = dff["TOTAL INVENTARIO COSTO"].sum()
-    falt    = dff["FALTANTES PVP"].sum()
-    sobr    = dff["SOBRANTES PVP"].sum()
-    neto    = dff["RESULT. NETO PVP"].sum()
-    cobrar  = dff["RESULT. A COBRAR PVP"].sum()
-    n_aud   = len(dff)
-    n_crit  = (dff["RIESGO_NORM"] == "CRÍTICO").sum()
-    n_alto  = (dff["RIESGO_NORM"] == "ALTO").sum()
-    n_medio = (dff["RIESGO_NORM"] == "MEDIO").sum()
-    n_bajo  = (dff["RIESGO_NORM"] == "BAJO").sum()
+    inv       = dff["TOTAL INVENTARIO COSTO"].sum()
+    cobrar_c  = pd.to_numeric(dff.get("RESULT. A COBRAR COSTO", 0), errors="coerce").fillna(0).sum() if "RESULT. A COBRAR COSTO" in dff.columns else 0
+    neto_c    = pd.to_numeric(dff.get("TOTAL COSTO NETO",       0), errors="coerce").fillna(0).sum() if "TOTAL COSTO NETO"       in dff.columns else 0
+    falt_c    = dff["FALTANTES PVP"].sum()
+    sobr_c    = dff["SOBRANTES PVP"].sum()
+    n_aud     = len(dff)
+    n_crit    = (dff["RIESGO_NORM"] == "CRÍTICO").sum()
+    n_alto    = (dff["RIESGO_NORM"] == "ALTO").sum()
+    n_medio   = (dff["RIESGO_NORM"] == "MEDIO").sum()
+    n_bajo    = (dff["RIESGO_NORM"] == "BAJO").sum()
     score_avg = dff["SCORE (0/100)"].mean()
+    mal_est   = dff["MAL ESTADO CADUCADOS PVP"].sum()
 
     c1,c2,c3,c4 = st.columns(4)
-    c1.markdown(f'<div class="kpi-card" style="border-top-color:{C_BLUE}"><div class="kpi-label">Inventario Auditado</div><div class="kpi-value neu">${inv/1e6:.2f}M</div><div class="kpi-sub">{n_aud} tiendas auditadas</div></div>', unsafe_allow_html=True)
-    c2.markdown(f'<div class="kpi-card" style="border-top-color:{C_RED}"><div class="kpi-label">Faltantes PVP</div><div class="kpi-value neg">{fmt_money(falt)}</div><div class="kpi-sub">vs {fmt_money(sobr)} sobrantes</div></div>', unsafe_allow_html=True)
-    c3.markdown(f'<div class="kpi-card" style="border-top-color:{C_AMBER}"><div class="kpi-label">Resultado Neto PVP</div><div class="kpi-value neg">{fmt_money(neto)}</div><div class="kpi-sub">Pérdida neta del período</div></div>', unsafe_allow_html=True)
-    c4.markdown(f'<div class="kpi-card" style="border-top-color:{C_RED}"><div class="kpi-label">A Cobrar PVP</div><div class="kpi-value neg">{fmt_money(cobrar)}</div><div class="kpi-sub">Recuperación pendiente</div></div>', unsafe_allow_html=True)
+    c1.markdown(f'<div class="kpi-card" style="border-top-color:{C_BLUE}"><div class="kpi-label">Inventario Auditado (Costo)</div><div class="kpi-value neu">${inv/1e6:.2f}M</div><div class="kpi-sub">{n_aud} auditorías en período</div></div>', unsafe_allow_html=True)
+    c2.markdown(f'<div class="kpi-card" style="border-top-color:{C_RED}"><div class="kpi-label">A Cobrar (Costo)</div><div class="kpi-value neg">{fmt_money(cobrar_c)}</div><div class="kpi-sub">Recuperación pendiente</div></div>', unsafe_allow_html=True)
+    c3.markdown(f'<div class="kpi-card" style="border-top-color:{C_AMBER}"><div class="kpi-label">Costo Neto Total</div><div class="kpi-value neg">{fmt_money(neto_c)}</div><div class="kpi-sub">Pérdida neta del período</div></div>', unsafe_allow_html=True)
+    c4.markdown(f'<div class="kpi-card" style="border-top-color:{C_GREEN}"><div class="kpi-label">Mal Estado / Caducados</div><div class="kpi-value neg">{fmt_money(mal_est)}</div><div class="kpi-sub">Faltantes: {fmt_money(falt_c)} · Sob: {fmt_money(sobr_c)}</div></div>', unsafe_allow_html=True)
 
     c5,c6,c7,c8 = st.columns(4)
     c5.markdown(f'<div class="kpi-card" style="border-top-color:{C_TEAL}"><div class="kpi-label">Auditorías</div><div class="kpi-value neu">{n_aud}</div><div class="kpi-sub">Período seleccionado</div></div>', unsafe_allow_html=True)
     c6.markdown(f'<div class="kpi-card" style="border-top-color:{C_RED}"><div class="kpi-label">Riesgo Crítico / Alto</div><div class="kpi-value neg">{n_crit + n_alto}</div><div class="kpi-sub">{n_crit} críticos · {n_alto} altos · {n_medio} medios</div></div>', unsafe_allow_html=True)
     c7.markdown(f'<div class="kpi-card" style="border-top-color:{C_PURPLE}"><div class="kpi-label">Score Riesgo Prom.</div><div class="kpi-value neu">{score_avg:.1f} / 100</div><div class="kpi-sub">Mayor = mayor riesgo</div></div>', unsafe_allow_html=True)
-    c8.markdown(f'<div class="kpi-card" style="border-top-color:{C_GREEN}"><div class="kpi-label">Mal Estado / Caducados</div><div class="kpi-value neg">{fmt_money(dff["MAL ESTADO CADUCADOS PVP"].sum())}</div><div class="kpi-sub">PVP afectado</div></div>', unsafe_allow_html=True)
+    c8.markdown(f'<div class="kpi-card" style="border-top-color:{C_NAVY}"><div class="kpi-label">Tiendas Auditadas</div><div class="kpi-value neu">{dff["ALMACÉN"].nunique()}</div><div class="kpi-sub">{dff["LÍNEA"].nunique()} líneas · {dff["ZONA"].nunique()} zonas</div></div>', unsafe_allow_html=True)
 
     st.markdown('<div class="section-title">Tendencia Mensual</div>', unsafe_allow_html=True)
     col_l, col_r = st.columns([2, 1])
     with col_l:
+        # Agrupar por MES (orden) y tomar MES_LABEL para mostrar
         mes_agg = dff.groupby("MES").agg(
-            auditorias=("No.","count"), result_neto=("RESULT. NETO PVP","sum"),
-            faltantes=("FALTANTES PVP","sum"), sobrantes=("SOBRANTES PVP","sum")
+            auditorias=("No.","count"),
+            cobrar_costo=("RESULT. A COBRAR COSTO","sum"),
+            neto_costo=("TOTAL COSTO NETO","sum"),
+            faltantes=("FALTANTES PVP","sum"),
+            sobrantes=("SOBRANTES PVP","sum"),
+            mes_label=("MES_LABEL","first")
         ).reset_index().sort_values("MES")
         fig = go.Figure()
-        fig.add_bar(x=mes_agg["MES"], y=mes_agg["faltantes"].abs(), name="Faltantes", marker_color=C_RED, opacity=0.85)
-        fig.add_bar(x=mes_agg["MES"], y=mes_agg["sobrantes"], name="Sobrantes", marker_color=C_GREEN, opacity=0.85)
-        fig.add_scatter(x=mes_agg["MES"], y=mes_agg["result_neto"].abs(), name="Resultado Neto",
-                        mode="lines+markers", line=dict(color=C_NAVY, width=2.5), marker=dict(size=8, color=C_NAVY))
+        fig.add_bar(x=mes_agg["mes_label"], y=mes_agg["faltantes"].abs(),
+                    name="Faltantes", marker_color=C_RED, opacity=0.85)
+        fig.add_bar(x=mes_agg["mes_label"], y=mes_agg["sobrantes"],
+                    name="Sobrantes", marker_color=C_GREEN, opacity=0.85)
+        fig.add_scatter(x=mes_agg["mes_label"], y=mes_agg["cobrar_costo"].abs(),
+                        name="A Cobrar (Costo)", mode="lines+markers",
+                        line=dict(color=C_NAVY, width=2.5), marker=dict(size=8, color=C_NAVY))
         fig.update_layout(barmode="group", height=280, plot_bgcolor="white", paper_bgcolor="white",
                           legend=dict(orientation="h", y=-0.2), margin=dict(l=0,r=0,t=10,b=0),
-                          xaxis=dict(showgrid=False), yaxis=dict(showgrid=True, gridcolor="#f0f0f0", tickprefix="$"))
+                          xaxis=dict(showgrid=False, tickangle=-45),
+                          yaxis=dict(showgrid=True, gridcolor="#f0f0f0", tickprefix="$"))
         st.plotly_chart(fig, use_container_width=True)
     with col_r:
-        st.markdown('<div class="section-title">Resultado por Zona</div>', unsafe_allow_html=True)
-        zona_agg = dff.groupby("ZONA").agg(auditorias=("No.","count"), result_neto=("RESULT. NETO PVP","sum")).reset_index()
-        fig2 = px.bar(zona_agg, x="result_neto", y="ZONA", orientation="h",
-                      color="result_neto", color_continuous_scale=["#E24B4A","#EF9F27","#639922"],
-                      labels={"result_neto":"Resultado Neto PVP","ZONA":""})
+        st.markdown('<div class="section-title">A Cobrar por Zona (Costo)</div>', unsafe_allow_html=True)
+        zona_agg = dff.groupby("ZONA").agg(
+            auditorias=("No.","count"),
+            cobrar_costo=("RESULT. A COBRAR COSTO","sum")
+        ).reset_index()
+        fig2 = px.bar(zona_agg, x="cobrar_costo", y="ZONA", orientation="h",
+                      color="cobrar_costo", color_continuous_scale=["#E24B4A","#EF9F27","#639922"],
+                      labels={"cobrar_costo":"A Cobrar Costo","ZONA":""})
         fig2.update_layout(height=280, plot_bgcolor="white", paper_bgcolor="white",
                            margin=dict(l=0,r=0,t=10,b=0), coloraxis_showscale=False,
                            xaxis=dict(tickprefix="$", showgrid=True, gridcolor="#f0f0f0"))
@@ -746,38 +761,65 @@ with tabs[2]:
 # ═══════════════════════════════════════════════
 with tabs[3]:
     st.markdown('<div class="section-title">Mapa de Calor — Todas las Tiendas</div>', unsafe_allow_html=True)
-    heat_df = dff[["ALMACÉN","ZONA","LÍNEA","RESULT. NETO PVP","FALTANTES PVP",
-                   "SCORE (0/100)","RIESGO_NORM","TOTAL INVENTARIO COSTO"]].copy()
+
+    # Filtro de rango de semáforo
+    heat_col1, heat_col2, heat_col3 = st.columns([1,1,2])
+    with heat_col1:
+        rango_min = st.number_input("Umbral rojo (desde)", value=-5000, step=500,
+                                    help="Valores menores a este umbral se marcan en rojo")
+    with heat_col2:
+        rango_step = st.number_input("Paso semáforo ($)", value=1000, min_value=100, step=100,
+                                     help="Intervalo entre verde, amarillo y rojo")
+    with heat_col3:
+        st.markdown(f"""<div style="font-size:11px;color:#666;margin-top:28px;">
+          🟢 ≥ {fmt_money(0)} &nbsp;·&nbsp;
+          🟡 {fmt_money(rango_min + rango_step)} a {fmt_money(0)} &nbsp;·&nbsp;
+          🔴 &lt; {fmt_money(rango_min)}
+        </div>""", unsafe_allow_html=True)
+
+    heat_df = dff.copy()
+    heat_df["COBRAR_COSTO"] = pd.to_numeric(heat_df.get("RESULT. A COBRAR COSTO", 0),
+                                              errors="coerce").fillna(0)
+
     fig = px.treemap(heat_df, path=[px.Constant("Todas"), "ZONA","LÍNEA","ALMACÉN"],
-                     values="TOTAL INVENTARIO COSTO", color="RESULT. NETO PVP",
+                     values="TOTAL INVENTARIO COSTO",
+                     color="COBRAR_COSTO",
                      color_continuous_scale=["#E24B4A","#EF9F27","#FFFF88","#639922"],
-                     color_continuous_midpoint=0,
-                     hover_data={"RESULT. NETO PVP":":.2f","FALTANTES PVP":":.2f","SCORE (0/100)":":.1f"})
+                     color_continuous_midpoint=rango_min / 2,
+                     hover_data={"COBRAR_COSTO":":.2f","SCORE (0/100)":":.1f"})
     fig.update_layout(height=420, margin=dict(l=0,r=0,t=10,b=0),
-                      coloraxis_colorbar=dict(title="Neto PVP", tickprefix="$"))
+                      coloraxis_colorbar=dict(title="A Cobrar Costo", tickprefix="$"))
     st.plotly_chart(fig, use_container_width=True)
 
-    tabla_heat = heat_df[["ALMACÉN","ZONA","LÍNEA","RESULT. NETO PVP","FALTANTES PVP","SCORE (0/100)","RIESGO_NORM"]].copy()
-    tabla_heat = tabla_heat.rename(columns={"RESULT. NETO PVP":"Result. Neto PVP",
-                                             "FALTANTES PVP":"Faltantes PVP",
-                                             "SCORE (0/100)":"Score","RIESGO_NORM":"Riesgo"})
-    tot_h = pd.DataFrame([{"ALMACÉN":"TOTAL","ZONA":"—","LÍNEA":"—",
-        "Result. Neto PVP":dff["RESULT. NETO PVP"].sum(),
-        "Faltantes PVP":dff["FALTANTES PVP"].sum(),
-        "Score":round(dff["SCORE (0/100)"].mean(),1), "Riesgo":"—"}])
+    tabla_heat = heat_df[["ALMACÉN","ZONA","LÍNEA","COBRAR_COSTO",
+                           "TOTAL INVENTARIO COSTO","SCORE (0/100)","RIESGO_NORM"]].copy()
+    tabla_heat = tabla_heat.rename(columns={
+        "COBRAR_COSTO":"A Cobrar Costo",
+        "TOTAL INVENTARIO COSTO":"Inventario Costo",
+        "SCORE (0/100)":"Score","RIESGO_NORM":"Riesgo"
+    })
 
-    def color_result(val):
+    umbral_rojo    = rango_min
+    umbral_amarillo = rango_min + rango_step
+
+    def color_costo(val):
         try:
             v = float(val)
-            if v < -1000:  return "background-color:#FFCCCC"
-            elif v < -100: return "background-color:#FFE5CC"
-            elif v < 0:    return "background-color:#FFFACC"
+            if v < umbral_rojo:     return "background-color:#FFCCCC"
+            elif v < umbral_amarillo: return "background-color:#FFE5CC"
+            elif v < 0:             return "background-color:#FFFACC"
             return "background-color:#D5F5E3"
         except: return ""
 
+    tot_h = pd.DataFrame([{"ALMACÉN":"TOTAL","ZONA":"—","LÍNEA":"—",
+        "A Cobrar Costo": heat_df["COBRAR_COSTO"].sum(),
+        "Inventario Costo": heat_df["TOTAL INVENTARIO COSTO"].sum(),
+        "Score": round(heat_df["SCORE (0/100)"].mean(),1), "Riesgo":"—"}])
     tabla_heat_full = pd.concat([tabla_heat, tot_h], ignore_index=True)
-    st.dataframe(tabla_heat_full.style.map(color_result, subset=["Result. Neto PVP","Faltantes PVP"]),
-                 use_container_width=True, hide_index=True)
+    st.dataframe(
+        tabla_heat_full.style.map(color_costo, subset=["A Cobrar Costo"]),
+        use_container_width=True, hide_index=True
+    )
     download_button_excel(tabla_heat_full, f"mapa_calor_{datetime.today().strftime('%Y%m%d')}.xlsx",
                           "⬇ Exportar tabla tiendas")
 
@@ -808,16 +850,26 @@ with tabs[4]:
 
     col_g, col_c = st.columns([2,1])
     with col_g:
-        st.markdown('<div class="section-title">Evolución de Resultados</div>', unsafe_allow_html=True)
+        st.markdown('<div class="section-title">Evolución de Resultados por Mes</div>', unsafe_allow_html=True)
+        # Agrupar por mes — si hay 2 auditorías en el mismo mes se suman
+        tienda_mes = tienda_df.groupby("MES").agg(
+            faltantes=("FALTANTES PVP","sum"),
+            sobrantes=("SOBRANTES PVP","sum"),
+            cobrar_costo=("RESULT. A COBRAR COSTO","sum"),
+            mes_label=("MES_LABEL","first")
+        ).reset_index().sort_values("MES")
         fig = go.Figure()
-        fig.add_bar(x=tienda_df["FECHA AUDITORÍA"], y=tienda_df["FALTANTES PVP"].abs(), name="Faltantes", marker_color=C_RED, opacity=0.7)
-        fig.add_bar(x=tienda_df["FECHA AUDITORÍA"], y=tienda_df["SOBRANTES PVP"], name="Sobrantes", marker_color=C_GREEN, opacity=0.7)
-        fig.add_scatter(x=tienda_df["FECHA AUDITORÍA"], y=tienda_df["RESULT. NETO PVP"].abs(),
-                        name="Neto Abs.", mode="lines+markers",
+        fig.add_bar(x=tienda_mes["mes_label"], y=tienda_mes["faltantes"].abs(),
+                    name="Faltantes", marker_color=C_RED, opacity=0.7)
+        fig.add_bar(x=tienda_mes["mes_label"], y=tienda_mes["sobrantes"],
+                    name="Sobrantes", marker_color=C_GREEN, opacity=0.7)
+        fig.add_scatter(x=tienda_mes["mes_label"], y=tienda_mes["cobrar_costo"].abs(),
+                        name="A Cobrar Costo", mode="lines+markers",
                         line=dict(color=C_NAVY, width=2), marker=dict(size=7))
         fig.update_layout(barmode="group", height=280, plot_bgcolor="white", paper_bgcolor="white",
                           legend=dict(orientation="h",y=-0.25), margin=dict(l=0,r=0,t=10,b=0),
-                          xaxis=dict(showgrid=False), yaxis=dict(showgrid=True, gridcolor="#f0f0f0", tickprefix="$"))
+                          xaxis=dict(showgrid=False, tickangle=-45),
+                          yaxis=dict(showgrid=True, gridcolor="#f0f0f0", tickprefix="$"))
         st.plotly_chart(fig, use_container_width=True)
     with col_c:
         st.markdown('<div class="section-title">Composición de Diferencias</div>', unsafe_allow_html=True)
@@ -1037,37 +1089,42 @@ with tabs[7]:
     mes_agg = dff.groupby("MES").agg(
         auditorias=("No.","count"), inventario=("TOTAL INVENTARIO COSTO","sum"),
         faltantes=("FALTANTES PVP","sum"), sobrantes=("SOBRANTES PVP","sum"),
-        result_neto=("RESULT. NETO PVP","sum"), cobrar=("RESULT. A COBRAR PVP","sum"),
+        cobrar_costo=("RESULT. A COBRAR COSTO","sum"),
+        neto_costo=("TOTAL COSTO NETO","sum"),
         mal_estado=("MAL ESTADO CADUCADOS PVP","sum"), score_prom=("SCORE (0/100)","mean"),
+        mes_label=("MES_LABEL","first"),
     ).reset_index().sort_values("MES")
 
-    mejor_mes = mes_agg.loc[mes_agg["result_neto"].idxmax(),"MES"]
-    peor_mes  = mes_agg.loc[mes_agg["result_neto"].idxmin(),"MES"]
+    mejor_mes = mes_agg.loc[mes_agg["cobrar_costo"].idxmax(),"mes_label"]
+    peor_mes  = mes_agg.loc[mes_agg["cobrar_costo"].idxmin(),"mes_label"]
     c1,c2,c3,c4 = st.columns(4)
     c1.markdown(f'<div class="kpi-card" style="border-top-color:{C_BLUE}"><div class="kpi-label">Meses Analizados</div><div class="kpi-value neu">{len(mes_agg)}</div><div class="kpi-sub">{mes_agg["auditorias"].sum():.0f} auditorías</div></div>', unsafe_allow_html=True)
-    c2.markdown(f'<div class="kpi-card" style="border-top-color:{C_GREEN}"><div class="kpi-label">Mejor Mes</div><div class="kpi-value pos" style="font-size:18px">{mejor_mes}</div><div class="kpi-sub">{fmt_money(mes_agg.loc[mes_agg["result_neto"].idxmax(),"result_neto"])}</div></div>', unsafe_allow_html=True)
-    c3.markdown(f'<div class="kpi-card" style="border-top-color:{C_RED}"><div class="kpi-label">Peor Mes</div><div class="kpi-value neg" style="font-size:18px">{peor_mes}</div><div class="kpi-sub">{fmt_money(mes_agg.loc[mes_agg["result_neto"].idxmin(),"result_neto"])}</div></div>', unsafe_allow_html=True)
-    c4.markdown(f'<div class="kpi-card" style="border-top-color:{C_AMBER}"><div class="kpi-label">Promedio Mensual</div><div class="kpi-value neg">{fmt_money(mes_agg["result_neto"].mean())}</div><div class="kpi-sub">Resultado neto PVP</div></div>', unsafe_allow_html=True)
+    c2.markdown(f'<div class="kpi-card" style="border-top-color:{C_GREEN}"><div class="kpi-label">Mejor Mes</div><div class="kpi-value pos" style="font-size:18px">{mejor_mes}</div><div class="kpi-sub">{fmt_money(mes_agg.loc[mes_agg["cobrar_costo"].idxmax(),"cobrar_costo"])}</div></div>', unsafe_allow_html=True)
+    c3.markdown(f'<div class="kpi-card" style="border-top-color:{C_RED}"><div class="kpi-label">Peor Mes</div><div class="kpi-value neg" style="font-size:18px">{peor_mes}</div><div class="kpi-sub">{fmt_money(mes_agg.loc[mes_agg["cobrar_costo"].idxmin(),"cobrar_costo"])}</div></div>', unsafe_allow_html=True)
+    c4.markdown(f'<div class="kpi-card" style="border-top-color:{C_AMBER}"><div class="kpi-label">Promedio Mensual</div><div class="kpi-value neg">{fmt_money(mes_agg["cobrar_costo"].mean())}</div><div class="kpi-sub">A cobrar costo promedio</div></div>', unsafe_allow_html=True)
 
     st.markdown('<div class="section-title">Faltantes vs Sobrantes por Mes</div>', unsafe_allow_html=True)
     fig1 = go.Figure()
-    fig1.add_bar(x=mes_agg["MES"], y=mes_agg["faltantes"].abs(), name="Faltantes PVP", marker_color=C_RED, opacity=0.85)
-    fig1.add_bar(x=mes_agg["MES"], y=mes_agg["sobrantes"], name="Sobrantes PVP", marker_color=C_GREEN, opacity=0.85)
-    fig1.add_scatter(x=mes_agg["MES"], y=mes_agg["result_neto"].abs(), name="Resultado Neto",
-                     mode="lines+markers+text", line=dict(color=C_NAVY,width=2.5),
-                     marker=dict(size=9,color=C_NAVY),
-                     text=[fmt_money(v) for v in mes_agg["result_neto"]],
+    fig1.add_bar(x=mes_agg["mes_label"], y=mes_agg["faltantes"].abs(),
+                 name="Faltantes", marker_color=C_RED, opacity=0.85)
+    fig1.add_bar(x=mes_agg["mes_label"], y=mes_agg["sobrantes"],
+                 name="Sobrantes", marker_color=C_GREEN, opacity=0.85)
+    fig1.add_scatter(x=mes_agg["mes_label"], y=mes_agg["cobrar_costo"].abs(),
+                     name="A Cobrar Costo", mode="lines+markers+text",
+                     line=dict(color=C_NAVY,width=2.5), marker=dict(size=9,color=C_NAVY),
+                     text=[fmt_money(v) for v in mes_agg["cobrar_costo"]],
                      textposition="top center", textfont=dict(size=11,color=C_NAVY))
     fig1.update_layout(barmode="group", height=320, plot_bgcolor="white", paper_bgcolor="white",
                        legend=dict(orientation="h",y=-0.2), margin=dict(l=0,r=0,t=20,b=0),
-                       xaxis=dict(showgrid=False), yaxis=dict(showgrid=True,gridcolor="#f0f0f0",tickprefix="$"))
+                       xaxis=dict(showgrid=False, tickangle=-45),
+                       yaxis=dict(showgrid=True,gridcolor="#f0f0f0",tickprefix="$"))
     st.plotly_chart(fig1, use_container_width=True)
 
     col_l, col_r = st.columns(2)
     with col_l:
         st.markdown('<div class="section-title">Auditorías por Mes</div>', unsafe_allow_html=True)
         fig2 = go.Figure()
-        fig2.add_bar(x=mes_agg["MES"], y=mes_agg["auditorias"], marker_color=C_BLUE, opacity=0.85,
+        fig2.add_bar(x=mes_agg["mes_label"], y=mes_agg["auditorias"], marker_color=C_BLUE, opacity=0.85,
                      text=mes_agg["auditorias"], textposition="outside")
         fig2.update_layout(height=260, plot_bgcolor="white", paper_bgcolor="white",
                            margin=dict(l=0,r=0,t=20,b=0), xaxis=dict(showgrid=False),
@@ -1077,7 +1134,7 @@ with tabs[7]:
         st.markdown('<div class="section-title">Score de Riesgo Promedio</div>', unsafe_allow_html=True)
         colors_s = [C_RED if v > 20 else C_AMBER if v > 10 else C_GREEN for v in mes_agg["score_prom"]]
         fig3 = go.Figure()
-        fig3.add_bar(x=mes_agg["MES"], y=mes_agg["score_prom"].round(1), marker_color=colors_s, opacity=0.85,
+        fig3.add_bar(x=mes_agg["mes_label"], y=mes_agg["score_prom"].round(1), marker_color=colors_s, opacity=0.85,
                      text=mes_agg["score_prom"].round(1), textposition="outside")
         fig3.update_layout(height=260, plot_bgcolor="white", paper_bgcolor="white",
                            margin=dict(l=0,r=0,t=20,b=0), xaxis=dict(showgrid=False),
@@ -1086,9 +1143,12 @@ with tabs[7]:
         st.plotly_chart(fig3, use_container_width=True)
 
     st.markdown('<div class="section-title">Tendencia por Línea de Negocio</div>', unsafe_allow_html=True)
-    linea_mes = dff.groupby(["MES","LÍNEA"]).agg(result_neto=("RESULT. NETO PVP","sum")).reset_index()
-    fig4 = px.line(linea_mes, x="MES", y="result_neto", color="LÍNEA", markers=True,
-                   labels={"result_neto":"Resultado Neto PVP","MES":"Mes","LÍNEA":"Línea"},
+    linea_mes = dff.groupby(["MES","LÍNEA"]).agg(
+        cobrar_costo=("RESULT. A COBRAR COSTO","sum"),
+        mes_label=("MES_LABEL","first")
+    ).reset_index().sort_values("MES")
+    fig4 = px.line(linea_mes, x="mes_label", y="cobrar_costo", color="LÍNEA", markers=True,
+                   labels={"cobrar_costo":"A Cobrar Costo","mes_label":"Mes","LÍNEA":"Línea"},
                    color_discrete_sequence=[C_RED,C_BLUE,C_GREEN,C_AMBER,C_TEAL,C_PURPLE,"#D85A30","#888780","#D4537E"])
     fig4.update_layout(height=300, plot_bgcolor="white", paper_bgcolor="white",
                        margin=dict(l=0,r=0,t=20,b=0), legend=dict(orientation="h",y=-0.25),
@@ -1097,19 +1157,20 @@ with tabs[7]:
     st.plotly_chart(fig4, use_container_width=True)
 
     st.markdown('<div class="section-title">Tabla Resumen Mensual</div>', unsafe_allow_html=True)
-    tabla_mes = mes_agg.copy()
-    tabla_mes.columns = ["Mes","Auditorías","Inventario","Faltantes PVP","Sobrantes PVP",
-                          "Result. Neto PVP","A Cobrar PVP","Mal Estado PVP","Score Prom."]
-    for col in ["Inventario","Faltantes PVP","Sobrantes PVP","Result. Neto PVP","A Cobrar PVP","Mal Estado PVP"]:
+    tabla_mes = mes_agg[["mes_label","auditorias","inventario","faltantes",
+                           "sobrantes","cobrar_costo","neto_costo","mal_estado","score_prom"]].copy()
+    tabla_mes.columns = ["Mes","Auditorías","Inventario","Faltantes","Sobrantes",
+                          "A Cobrar Costo","Costo Neto","Mal Estado","Score Prom."]
+    for col in ["Inventario","Faltantes","Sobrantes","A Cobrar Costo","Costo Neto","Mal Estado"]:
         tabla_mes[col] = tabla_mes[col].apply(fmt_money)
     tabla_mes["Score Prom."] = tabla_mes["Score Prom."].round(1)
     tot_m = pd.DataFrame([{"Mes":"TOTAL","Auditorías":int(mes_agg["auditorias"].sum()),
         "Inventario":fmt_money(mes_agg["inventario"].sum()),
-        "Faltantes PVP":fmt_money(mes_agg["faltantes"].sum()),
-        "Sobrantes PVP":fmt_money(mes_agg["sobrantes"].sum()),
-        "Result. Neto PVP":fmt_money(mes_agg["result_neto"].sum()),
-        "A Cobrar PVP":fmt_money(mes_agg["cobrar"].sum()),
-        "Mal Estado PVP":fmt_money(mes_agg["mal_estado"].sum()),
+        "Faltantes":fmt_money(mes_agg["faltantes"].sum()),
+        "Sobrantes":fmt_money(mes_agg["sobrantes"].sum()),
+        "A Cobrar Costo":fmt_money(mes_agg["cobrar_costo"].sum()),
+        "Costo Neto":fmt_money(mes_agg["neto_costo"].sum()),
+        "Mal Estado":fmt_money(mes_agg["mal_estado"].sum()),
         "Score Prom.":round(mes_agg["score_prom"].mean(),1)}])
     tabla_mes_full = pd.concat([tabla_mes, tot_m], ignore_index=True)
     st.dataframe(tabla_mes_full, use_container_width=True, hide_index=True)
