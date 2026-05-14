@@ -156,7 +156,7 @@ def download_button_excel(df: pd.DataFrame, filename: str, label: str = "⬇ Des
 # CARGA DE DATOS — con st.file_uploader + caché
 # ─────────────────────────────────────────────
 @st.cache_data(show_spinner=False)
-def load_data(file_bytes: bytes):
+def load_data(file_bytes: bytes, config_bytes: bytes = None):
     xl = pd.ExcelFile(io.BytesIO(file_bytes))
 
     df = pd.read_excel(xl, sheet_name="Registro_Auditorias", header=3)
@@ -205,7 +205,53 @@ def load_data(file_bytes: bytes):
         if c in df_sku.columns:
             df_sku[c] = pd.to_numeric(df_sku[c], errors="coerce").fillna(0)
 
-    return df, last_audit, df_sku
+    # Cargar config de tiendas si está disponible
+    # Estructura real: hoja 'Tiendas', cols: 'Nombre tienda', 'Estado',
+    #   'Auditor responsable', 'Zona', 'Línea', 'EMPRESA', 'Centro'
+    tiendas_activas  = None
+    df_config_tiendas = None
+    if config_bytes:
+        try:
+            import io as _io
+            df_config_tiendas = pd.read_excel(
+                _io.BytesIO(config_bytes), sheet_name='Tiendas'
+            )
+            df_config_tiendas.columns = [str(c).strip() for c in df_config_tiendas.columns]
+            # Normalizar nombre de columna Estado
+            for _col in df_config_tiendas.columns:
+                if _col.lower() == 'estado':
+                    df_config_tiendas.rename(columns={_col: 'Estado'}, inplace=True)
+                if _col.lower() in ('nombre tienda', 'nombre_tienda', 'almacen', 'almacén'):
+                    df_config_tiendas.rename(columns={_col: 'Nombre tienda'}, inplace=True)
+            if 'Estado' in df_config_tiendas.columns and 'Nombre tienda' in df_config_tiendas.columns:
+                tiendas_activas = set(
+                    df_config_tiendas[
+                        df_config_tiendas['Estado'].str.strip().str.lower() == 'activa'
+                    ]['Nombre tienda'].str.strip().unique()
+                )
+        except Exception:
+            tiendas_activas = None
+            df_config_tiendas = None
+
+    # Filtrar tiendas cerradas del histórico principal
+    if tiendas_activas:
+        df_activas = df[df['ALMACÉN'].str.strip().isin(tiendas_activas)].copy()
+        if len(df_activas) > 0:
+            df = df_activas
+
+    # Recalcular last_audit con tiendas activas
+    TODAY = pd.Timestamp('today').normalize()
+    last_audit = df.sort_values('FECHA AUDITORÍA').groupby('ALMACÉN').last().reset_index()
+    last_audit['DÍAS SIN AUDITAR'] = (TODAY - last_audit['FECHA AUDITORÍA']).dt.days
+    last_audit['SCORE (0/100)']    = pd.to_numeric(last_audit['SCORE (0/100)'], errors='coerce').fillna(0)
+    last_audit['RESULT. NETO PVP'] = pd.to_numeric(last_audit['RESULT. NETO PVP'], errors='coerce').fillna(0)
+    last_audit['PRIORIDAD_SCORE']  = (
+        last_audit['DÍAS SIN AUDITAR'] * 0.4 +
+        last_audit['SCORE (0/100)']    * 1.5 +
+        last_audit['RESULT. NETO PVP'].abs() * 0.015
+    )
+
+    return df, last_audit, df_sku, tiendas_activas, df_config_tiendas
 
 
 # ─────────────────────────────────────────────
@@ -218,6 +264,23 @@ with st.sidebar:
         type=["xlsx"],
         help="Sube Historico_auditorias_retail.xlsx"
     )
+    st.markdown("---")
+    st.markdown("### 📋 Config Tiendas")
+    uploaded_config = st.file_uploader(
+        "Detalle_Tiendas_Auditores.xlsx",
+        type=["xlsx"],
+        help="Sube el archivo de configuración con columna ESTADO (Activa/Cerrada)"
+    )
+    config_bytes = None
+    if uploaded_config:
+        config_bytes = uploaded_config.read()
+    # Intentar leer config local
+    elif os.path.exists(os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                                     "Detalle_Tiendas_Auditores.xlsx")):
+        with open(os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                               "Detalle_Tiendas_Auditores.xlsx"), "rb") as _f:
+            config_bytes = _f.read()
+
     st.markdown("---")
     st.markdown("### 🔍 Filtros")
 
@@ -242,11 +305,22 @@ with st.sidebar:
     # Carga con manejo de errores
     try:
         with st.spinner("Cargando datos..."):
-            df, last_audit, df_sku = load_data(file_bytes)
+            df, last_audit, df_sku, tiendas_activas, df_config_tiendas = load_data(file_bytes, config_bytes)
     except Exception as e:
         st.error(f"❌ Error al leer el archivo: {e}")
         st.info("Verifica que el archivo tenga las hojas: Registro_Auditorias, Detalle_SKUs")
         st.stop()
+
+    # Mostrar estado del filtro de tiendas
+    if tiendas_activas is not None and df_config_tiendas is not None:
+        n_activas  = (df_config_tiendas['Estado'].str.strip().str.lower() == 'activa').sum()
+        n_cerradas = (df_config_tiendas['Estado'].str.strip().str.lower() == 'cerrada').sum()
+        if n_cerradas > 0:
+            st.sidebar.success(f"✓ {n_activas} activas · {n_cerradas} cerradas excluidas")
+        else:
+            st.sidebar.info(f"✓ Config cargada · {n_activas} tiendas activas")
+    elif config_bytes is None:
+        st.sidebar.warning("Sin config — sube Detalle_Tiendas_Auditores.xlsx")
 
     zonas     = ["Todas"] + sorted(df["ZONA"].dropna().unique().tolist())
     lineas    = ["Todas"] + sorted(df["LÍNEA"].dropna().unique().tolist())
@@ -911,10 +985,22 @@ with tabs[6]:
             (semana_label(2), "#FFFACC", "#7D6608", ia_top.iloc[7:12]),
             (semana_label(3), "#EAF3DE", "#27500A", ia_top.iloc[12:17]),
         ]
-        # Auditor por zona — dinámico desde los datos
-        auditor_por_zona = (dff.groupby("ZONA")["AUDITOR"]
-                            .agg(lambda x: x.value_counts().index[0] if len(x) > 0 else "Por asignar")
-                            .to_dict())
+        # Auditor por tienda — desde config real (Detalle_Tiendas_Auditores)
+        auditor_por_tienda = {}
+        auditor_por_zona   = {}
+        if df_config_tiendas is not None and 'Auditor responsable' in df_config_tiendas.columns:
+            for _, _row in df_config_tiendas.iterrows():
+                _nombre = str(_row.get('Nombre tienda', '')).strip()
+                _aud    = str(_row.get('Auditor responsable', '')).strip()
+                _zona   = str(_row.get('Zona', '')).strip()
+                if _nombre:
+                    auditor_por_tienda[_nombre] = _aud
+                if _zona and _zona not in auditor_por_zona:
+                    auditor_por_zona[_zona] = _aud
+        else:
+            auditor_por_zona = (dff.groupby("ZONA")["AUDITOR"]
+                                .agg(lambda x: x.value_counts().index[0] if len(x) > 0 else "Por asignar")
+                                .to_dict())
         for sem_title, bg, fg, stores in semanas_config:
             st.markdown(f"""<div style="background:{bg};border-radius:8px;padding:8px 12px;margin-bottom:8px">
               <div style="font-size:11px;font-weight:700;color:{fg};margin-bottom:6px">{sem_title}</div>""",
