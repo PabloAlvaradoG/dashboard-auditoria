@@ -890,12 +890,16 @@ with tabs[4]:
         else:
             st.success("Sin diferencias registradas.")
 
+    # Calcular columnas costo de forma segura antes de armar la tabla
+    tienda_df["_cobrar_c"] = pd.to_numeric(tienda_df.get("RESULT. A COBRAR COSTO", 0), errors="coerce").fillna(0)
+    tienda_df["_neto_c"]   = pd.to_numeric(tienda_df.get("TOTAL COSTO NETO",       0), errors="coerce").fillna(0)
+
     tabla_t = tienda_df[["REF. INFORME","FECHA AUDITORÍA","AUDITOR",
                           "TOTAL INVENTARIO COSTO","FALTANTES PVP","SOBRANTES PVP",
-                          "RESULT. NETO PVP","RESULT. A COBRAR PVP",
+                          "_cobrar_c","_neto_c",
                           "SCORE (0/100)","RIESGO_NORM","OBSERVACIONES"]].copy()
     tabla_t["FECHA AUDITORÍA"] = tabla_t["FECHA AUDITORÍA"].dt.strftime("%d/%m/%Y")
-    for col in ["TOTAL INVENTARIO COSTO","FALTANTES PVP","SOBRANTES PVP","RESULT. A COBRAR COSTO","TOTAL COSTO NETO"]:
+    for col in ["TOTAL INVENTARIO COSTO","FALTANTES PVP","SOBRANTES PVP","_cobrar_c","_neto_c"]:
         tabla_t[col] = tabla_t[col].apply(fmt_money)
     tabla_t.columns = ["Ref. Informe","Fecha","Auditor","Inventario","Faltantes",
                         "Sobrantes","A Cobrar Costo","Costo Neto","Score","Riesgo","Observaciones"]
@@ -903,8 +907,8 @@ with tabs[4]:
         "Inventario":fmt_money(tienda_df["TOTAL INVENTARIO COSTO"].sum()),
         "Faltantes":fmt_money(tienda_df["FALTANTES PVP"].sum()),
         "Sobrantes":fmt_money(tienda_df["SOBRANTES PVP"].sum()),
-        "A Cobrar Costo":fmt_money(pd.to_numeric(tienda_df.get("RESULT. A COBRAR COSTO",0),errors="coerce").fillna(0).sum()),
-        "Costo Neto":fmt_money(pd.to_numeric(tienda_df.get("TOTAL COSTO NETO",0),errors="coerce").fillna(0).sum()),
+        "A Cobrar Costo":fmt_money(tienda_df["_cobrar_c"].sum()),
+        "Costo Neto":fmt_money(tienda_df["_neto_c"].sum()),
         "Score":round(tienda_df["SCORE (0/100)"].mean(),1),"Riesgo":"—","Observaciones":"—"}])
     tabla_t_full = pd.concat([tabla_t, tot_t], ignore_index=True)
     st.dataframe(tabla_t_full, use_container_width=True, hide_index=True)
