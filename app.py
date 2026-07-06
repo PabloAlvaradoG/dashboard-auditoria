@@ -123,6 +123,7 @@ from domain.cobertura import calcular_cobertura
 from domain.aging import clasificar_aging
 from domain.ciclos import generar_ciclos_26_25, label_ciclo
 from domain.kpi_auditores import calcular_cumplimiento, clasificar_semaforo
+from domain.reportes import construir_tabla_jerarquica
 from ui.exportar import df_to_excel_bytes, download_button_excel
 from ui.componentes import tarjeta_kpi, titulo_seccion, tabla_con_fila_total
 from ui.paginas import mapa_calor
@@ -1910,41 +1911,75 @@ with tabs[9]:
     download_button_excel(tabla_kpi, f"kpi_auditores_resumen_{datetime.today().strftime('%Y%m%d')}.xlsx",
                           "⬇ Exportar resumen KPI")
 
-    # ── Tabla detalle de auditorías del ciclo ──
+    # ── Tabla detalle de auditorías del ciclo: reporte jerárquico
+    # Auditor > Línea > Tienda, con subtotal por línea y total por auditor,
+    # cerrando con el total general del ciclo — formato de papel de trabajo.
     titulo_seccion("Detalle de Auditorías del Ciclo")
     detalle_kpi = df_ciclo.copy()
     if sel_tipo_kpi != "Todos":
         detalle_kpi = detalle_kpi[detalle_kpi[COL_TIPO_AUDITOR] == sel_tipo_kpi]
 
-    cols_detalle = [COL_AUDITOR,COL_LINEA,COL_CENTRO_SAP,COL_ALMACEN,COL_FECHA_AUDITORIA,
-                     COL_TOTAL_INVENTARIO_COSTO,COL_RESULT_A_COBRAR_PVP,COL_RESULT_A_COBRAR_COSTO,COL_ESTADO_REGISTRO]
-    nombres_detalle = ["Auditor","Subgrupo Línea","Centro SAP","Tienda","Fecha Auditoría",
-                        "Total Inventario Costo","A Cobrar PVP","A Cobrar Costo","Estado de Registro"]
+    cols_detalle = [COL_AUDITOR, COL_LINEA, COL_CENTRO_SAP, COL_ALMACEN, COL_FECHA_AUDITORIA,
+                     COL_TOTAL_INVENTARIO_COSTO, COL_RESULT_A_COBRAR_PVP, COL_RESULT_A_COBRAR_COSTO,
+                     COL_ESTADO_REGISTRO]
+    nombres_detalle = ["Auditor", "Línea", "Centro SAP", "Tienda", "Fecha Auditoría",
+                        "Total Inventario Costo", "A Cobrar PVP", "A Cobrar Costo", "Estado de Registro"]
     mapa_nombres = dict(zip(cols_detalle, nombres_detalle))
     cols_detalle_exist = [c for c in cols_detalle if c in detalle_kpi.columns]
 
-    tabla_detalle_kpi = detalle_kpi[cols_detalle_exist].copy().sort_values(COL_FECHA_AUDITORIA)
-    tabla_detalle_kpi[COL_FECHA_AUDITORIA] = pd.to_datetime(
-        tabla_detalle_kpi[COL_FECHA_AUDITORIA], errors="coerce").dt.strftime("%d/%m/%Y")
-    if COL_CENTRO_SAP in tabla_detalle_kpi.columns:
-        tabla_detalle_kpi[COL_CENTRO_SAP] = pd.to_numeric(tabla_detalle_kpi[COL_CENTRO_SAP], errors="coerce").apply(
+    base_detalle = detalle_kpi[cols_detalle_exist].copy()
+    base_detalle[COL_FECHA_AUDITORIA] = pd.to_datetime(base_detalle[COL_FECHA_AUDITORIA], errors="coerce")
+    if COL_CENTRO_SAP in base_detalle.columns:
+        base_detalle[COL_CENTRO_SAP] = pd.to_numeric(base_detalle[COL_CENTRO_SAP], errors="coerce").apply(
             lambda v: str(int(v)) if pd.notna(v) else "—")
-
-    cols_money_detalle = [c for c in [COL_TOTAL_INVENTARIO_COSTO,COL_RESULT_A_COBRAR_PVP,COL_RESULT_A_COBRAR_COSTO]
-                          if c in tabla_detalle_kpi.columns]
+    cols_money_detalle = [c for c in [COL_TOTAL_INVENTARIO_COSTO, COL_RESULT_A_COBRAR_PVP, COL_RESULT_A_COBRAR_COSTO]
+                          if c in base_detalle.columns]
     for col in cols_money_detalle:
-        tabla_detalle_kpi[col] = pd.to_numeric(tabla_detalle_kpi[col], errors="coerce").fillna(0).apply(fmt_money)
+        base_detalle[col] = pd.to_numeric(base_detalle[col], errors="coerce").fillna(0)
 
-    tabla_detalle_kpi = tabla_detalle_kpi.rename(columns=mapa_nombres)
-    if len(tabla_detalle_kpi) == 0:
+    if len(base_detalle) == 0:
         st.info("No hay auditorías registradas en este ciclo para el tipo de auditor seleccionado.")
     else:
+        # Renombrar antes de agrupar para que domain/reportes.py trabaje con
+        # los nombres de columna finales (más legible en las etiquetas de
+        # subtotal, ej. "Subtotal — TCL" en vez de "Subtotal — {COL_LINEA}").
+        base_detalle = base_detalle.rename(columns=mapa_nombres)
+        base_detalle["Fecha Auditoría"] = base_detalle["Fecha Auditoría"].dt.strftime("%d/%m/%Y")
         nombres_money_detalle = [mapa_nombres[c] for c in cols_money_detalle]
-        tot_detalle = {c: "—" for c in tabla_detalle_kpi.columns}
-        tot_detalle["Auditor"] = "TOTAL"
-        for c_orig, c_nom in zip(cols_money_detalle, nombres_money_detalle):
-            tot_detalle[c_nom] = fmt_money(pd.to_numeric(detalle_kpi[c_orig], errors="coerce").fillna(0).sum())
-        tabla_detalle_full = pd.concat([tabla_detalle_kpi, pd.DataFrame([tot_detalle])], ignore_index=True)
-        st.dataframe(tabla_detalle_full, use_container_width=True, hide_index=True)
-        download_button_excel(tabla_detalle_full, f"kpi_auditores_detalle_{datetime.today().strftime('%Y%m%d')}.xlsx",
-                              "⬇ Exportar detalle del ciclo", money_cols=nombres_money_detalle)
+
+        tabla_jerarquica = construir_tabla_jerarquica(
+            base_detalle, col_grupo1="Auditor", col_grupo2="Línea",
+            cols_valor=nombres_money_detalle,
+            cols_detalle=nombres_detalle,
+            etiqueta_total_general="TOTAL GENERAL DEL CICLO",
+            orden_extra=["Tienda"],
+        )
+
+        # Formatear a moneda DESPUÉS de sumar (los subtotales ya están en
+        # numérico correcto; si se formatea antes, "$-1,234.56" no suma).
+        for col in nombres_money_detalle:
+            tabla_jerarquica[col] = tabla_jerarquica[col].apply(
+                lambda v: fmt_money(v) if isinstance(v, (int, float)) else v)
+
+        def _estilo_fila_jerarquica(row_mostrada, tipo):
+            n = len(row_mostrada)
+            if tipo == "total_general":
+                return ["background-color:#0C2C4C;color:white;font-weight:700"] * n
+            if tipo == "total_grupo":
+                return ["background-color:#DCE7F5;color:#0C2C4C;font-weight:700"] * n
+            if tipo == "subtotal":
+                return ["background-color:#F1F4F9;color:#3D4C63;font-weight:600;font-style:italic"] * n
+            return [""] * n
+
+        tabla_mostrar = tabla_jerarquica.drop(columns=["_tipo_fila"])
+        st.dataframe(
+            tabla_mostrar.style.apply(
+                lambda r: _estilo_fila_jerarquica(r, tabla_jerarquica.loc[r.name, "_tipo_fila"]), axis=1),
+            use_container_width=True, hide_index=True, height=min(600, 40 + 35 * len(tabla_mostrar)),
+        )
+        st.caption("Subtotal = suma por línea de negocio dentro de cada auditor · Total = suma por auditor · "
+                   "Total General = cierre de todas las auditorías del ciclo.")
+        download_button_excel(
+            tabla_mostrar, f"kpi_auditores_detalle_{datetime.today().strftime('%Y%m%d')}.xlsx",
+            "⬇ Exportar detalle del ciclo", money_cols=nombres_money_detalle,
+        )
