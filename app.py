@@ -158,14 +158,71 @@ def normalizar_clave_tienda(nombre):
 # ─────────────────────────────────────────────
 # EXPORTAR DATAFRAME A EXCEL (download button)
 # ─────────────────────────────────────────────
-def df_to_excel_bytes(df: pd.DataFrame) -> bytes:
+def _texto_a_numero(v):
+    """Convierte '$-1,234.56' -> -1234.56 (float). Deja pasar valores ya numéricos."""
+    if isinstance(v, (int, float)) and not isinstance(v, bool):
+        return v
+    s = str(v).strip()
+    if s in ("", "—", "-", "nan", "None"):
+        return None
+    # FIX: fmt_money produce "$-1,234.56" (signo DESPUÉS del símbolo $), así
+    # que hay que quitar "$" y "," primero y recién ahí revisar el signo —
+    # revisarlo antes hacía que s.startswith("-") siempre diera False.
+    s = s.replace("$", "").replace(",", "").strip()
+    neg = s.startswith("-")
+    s = s.lstrip("-").strip()
+    try:
+        val = float(s)
+        return -val if neg else val
+    except ValueError:
+        return v
+
+def df_to_excel_bytes(df: pd.DataFrame, money_cols=None) -> bytes:
+    """Exporta a Excel con estilo profesional. Las columnas en `money_cols`
+    (que en pantalla llegan como texto '$1,234.56' para que se vean bien en
+    st.dataframe) se convierten de vuelta a número real con formato de
+    moneda de Excel — así el archivo exportado se puede sumar, ordenar y
+    graficar directamente en Excel, en vez de quedar como texto."""
+    from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
+    money_cols = set(money_cols or [])
+    df2 = df.copy()
+    for c in money_cols:
+        if c in df2.columns:
+            df2[c] = df2[c].apply(_texto_a_numero)
+
     buf = io.BytesIO()
     with pd.ExcelWriter(buf, engine="openpyxl") as writer:
-        df.to_excel(writer, index=False)
+        df2.to_excel(writer, index=False, sheet_name="Datos")
+        ws = writer.sheets["Datos"]
+
+        header_fill = PatternFill("solid", fgColor="1F3864")
+        header_font = Font(name="Calibri", bold=True, size=10, color="FFFFFF")
+        border_fina = Border(bottom=Side(style="thin", color="D9D9D9"))
+
+        for col_idx, col_name in enumerate(df2.columns, start=1):
+            cell = ws.cell(row=1, column=col_idx)
+            cell.fill = header_fill
+            cell.font = header_font
+            cell.alignment = Alignment(horizontal="center", vertical="center", wrap_text=True)
+
+            es_moneda = col_name in money_cols
+            max_len = len(str(col_name))
+            for row_idx in range(2, ws.max_row + 1):
+                c = ws.cell(row=row_idx, column=col_idx)
+                c.border = border_fina
+                if es_moneda:
+                    c.number_format = '$#,##0.00;[Red]-$#,##0.00'
+                    c.alignment = Alignment(horizontal="right")
+                val_len = len(f"{c.value:,.2f}") if (es_moneda and isinstance(c.value, (int, float))) else len(str(c.value)) if c.value is not None else 0
+                max_len = max(max_len, val_len)
+            ws.column_dimensions[cell.column_letter].width = min(max_len + 3, 42)
+
+        ws.freeze_panes = "A2"
+        ws.auto_filter.ref = ws.dimensions
     return buf.getvalue()
 
-def download_button_excel(df: pd.DataFrame, filename: str, label: str = "⬇ Descargar Excel"):
-    data = df_to_excel_bytes(df)
+def download_button_excel(df: pd.DataFrame, filename: str, label: str = "⬇ Descargar Excel", money_cols=None):
+    data = df_to_excel_bytes(df, money_cols=money_cols)
     st.download_button(label=label, data=data,
                        file_name=filename, mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
 
@@ -244,6 +301,12 @@ def load_data(file_bytes: bytes, config_bytes: bytes = None):
     #   'Fecha' = fecha de cierre (si Estado=Cerrada) o fecha de apertura
     #   (si Estado=Activa y la tienda abrió este año). Hoja 'Correos auditores'
     #   trae 'Auditor responsable','Zona','Tipo auditor','Correo'.
+    #
+    # FIX: se buscan estas hojas primero en config_bytes (Detalle_Tiendas_
+    # Auditores.xlsx) y, si no vienen ahí, como respaldo dentro del propio
+    # file_bytes (Historico_auditorias_retail.xlsx) por si Pablo agrega esas
+    # hojas directamente al histórico y sube solo un archivo.
+    import io as _io
     tiendas_activas    = None
     df_config_tiendas  = None
     df_auditor_tipo    = None
@@ -252,13 +315,16 @@ def load_data(file_bytes: bytes, config_bytes: bytes = None):
         "cerradas_anio":     pd.DataFrame(),
         "abiertas_anio":     pd.DataFrame(),
         "anio_actual":       datetime.today().year,
+        "fuente":            None,
     }
     ANIO_ACTUAL = datetime.today().year
+    fuentes = [("config", config_bytes), ("historico", file_bytes)]
 
-    if config_bytes:
+    for _nombre_fuente, _bytes in fuentes:
+        if df_config_tiendas is not None or not _bytes:
+            continue
         try:
-            import io as _io
-            df_config_tiendas = pd.read_excel(_io.BytesIO(config_bytes), sheet_name='Tiendas')
+            df_config_tiendas = pd.read_excel(_io.BytesIO(_bytes), sheet_name='Tiendas')
             df_config_tiendas.columns = [str(c).strip() for c in df_config_tiendas.columns]
             # Normalizar nombres de columnas clave (tolerante a variantes)
             for _col in df_config_tiendas.columns:
@@ -281,6 +347,7 @@ def load_data(file_bytes: bytes, config_bytes: bytes = None):
                 tiendas_activas = set(
                     df_config_tiendas.loc[df_config_tiendas['Estado'] == 'ACTIVA', '_CLAVE_TIENDA']
                 )
+                tiendas_info["fuente"] = _nombre_fuente
 
                 # ── Tiendas activas por línea (según el config = fuente de verdad) ──
                 if 'Línea' in df_config_tiendas.columns:
@@ -303,13 +370,18 @@ def load_data(file_bytes: bytes, config_bytes: bytes = None):
                         (df_config_tiendas['Fecha'].dt.year == ANIO_ACTUAL)
                     ].copy()
                 tiendas_info["anio_actual"] = ANIO_ACTUAL
+            else:
+                df_config_tiendas = None
         except Exception:
-            tiendas_activas   = None
             df_config_tiendas = None
 
-        # ── Tipo de auditor (Retail / Coral / ...) desde 'Correos auditores' ──
+    # ── Tipo de auditor (Retail / Coral / ...) desde 'Correos auditores' ──
+    # Mismo esquema de respaldo: config_bytes primero, luego dentro del histórico.
+    for _nombre_fuente, _bytes in fuentes:
+        if df_auditor_tipo is not None or not _bytes:
+            continue
         try:
-            df_auditor_tipo = pd.read_excel(_io.BytesIO(config_bytes), sheet_name='Correos auditores')
+            df_auditor_tipo = pd.read_excel(_io.BytesIO(_bytes), sheet_name='Correos auditores')
             df_auditor_tipo.columns = [str(c).strip() for c in df_auditor_tipo.columns]
             for _col in df_auditor_tipo.columns:
                 if _col.lower() in ('auditor responsable', 'auditor'):
@@ -350,6 +422,43 @@ def load_data(file_bytes: bytes, config_bytes: bytes = None):
         last_audit['SCORE (0/100)']    * 1.5 +
         last_audit['RESULT. A COBRAR COSTO'].abs() * 0.015
     )
+
+    # ── Reincidencia: veces en riesgo ALTO/CRÍTICO en los últimos 12 meses ──
+    # Ayuda a distinguir una caída puntual de un problema estructural de tienda.
+    ventana_12m = df[
+        (df['FECHA AUDITORÍA'] >= TODAY - pd.Timedelta(days=365)) &
+        (df['RIESGO_NORM'].isin(['ALTO', 'CRÍTICO']))
+    ]
+    reincidencia = ventana_12m.groupby('ALMACÉN').size().rename('REINCIDENCIA_12M')
+    last_audit = last_audit.merge(reincidencia, on='ALMACÉN', how='left')
+    last_audit['REINCIDENCIA_12M'] = last_audit['REINCIDENCIA_12M'].fillna(0).astype(int)
+
+    # ── Cobertura de auditoría: tiendas activas vs. auditadas recientemente ──
+    # Responde "¿qué % de la red activa se ha auditado en los últimos 90/180
+    # días?" — un KPI de cumplimiento de plan, no solo de resultado financiero.
+    if df_config_tiendas is not None and tiendas_activas:
+        activas_df = df_config_tiendas[df_config_tiendas['Estado'] == 'ACTIVA'].copy()
+        activas_df['_CLAVE'] = activas_df['Nombre tienda'].apply(normalizar_clave_tienda)
+        last_audit['_CLAVE_TIENDA'] = last_audit['ALMACÉN'].apply(normalizar_clave_tienda)
+        mapa_dias = dict(zip(last_audit['_CLAVE_TIENDA'], last_audit['DÍAS SIN AUDITAR']))
+        activas_df['DÍAS SIN AUDITAR'] = activas_df['_CLAVE'].map(mapa_dias)
+        # Tienda activa sin ninguna auditoría registrada -> se trata como "nunca auditada"
+        activas_df['DÍAS SIN AUDITAR'] = activas_df['DÍAS SIN AUDITAR'].fillna(99999)
+        n_tot = len(activas_df)
+        n_90  = (activas_df['DÍAS SIN AUDITAR'] <= 90).sum()
+        n_180 = (activas_df['DÍAS SIN AUDITAR'] <= 180).sum()
+        tiendas_info['cobertura'] = {
+            'n_activas': n_tot,
+            'n_auditadas_90d': int(n_90),
+            'n_auditadas_180d': int(n_180),
+            'pct_90d': (n_90 / n_tot * 100) if n_tot else 0,
+            'pct_180d': (n_180 / n_tot * 100) if n_tot else 0,
+            'pendientes_90d': activas_df[activas_df['DÍAS SIN AUDITAR'] > 90][
+                ['Nombre tienda', 'Línea', 'Zona', 'Auditor responsable', 'DÍAS SIN AUDITAR']
+            ].sort_values('DÍAS SIN AUDITAR', ascending=False),
+        }
+    else:
+        tiendas_info['cobertura'] = None
 
     return df, last_audit, df_sku, tiendas_activas, df_config_tiendas, tiendas_info
 
@@ -415,12 +524,13 @@ with st.sidebar:
     if tiendas_activas is not None and df_config_tiendas is not None:
         n_activas  = (df_config_tiendas['Estado'] == 'ACTIVA').sum()
         n_cerradas = (df_config_tiendas['Estado'] == 'CERRADA').sum()
+        origen = "hoja 'Tiendas' del histórico" if tiendas_info.get("fuente") == "historico" else "Detalle_Tiendas_Auditores.xlsx"
         if n_cerradas > 0:
-            st.sidebar.success(f"✓ {n_activas} activas · {n_cerradas} cerradas excluidas")
+            st.sidebar.success(f"✓ {n_activas} activas · {n_cerradas} cerradas excluidas ({origen})")
         else:
-            st.sidebar.info(f"✓ Config cargada · {n_activas} tiendas activas")
-    elif config_bytes is None:
-        st.sidebar.warning("Sin config — sube Detalle_Tiendas_Auditores.xlsx")
+            st.sidebar.info(f"✓ {n_activas} tiendas activas ({origen})")
+    else:
+        st.sidebar.warning("Sin datos de tiendas — sube Detalle_Tiendas_Auditores.xlsx o agrega una hoja 'Tiendas' al histórico")
 
     zonas     = ["Todas"] + sorted(df["ZONA"].dropna().unique().tolist())
     lineas    = ["Todas"] + sorted(df["LÍNEA"].dropna().unique().tolist())
@@ -723,6 +833,64 @@ with tabs[0]:
                     st.markdown(f'<div style="font-size:11px;color:#27500A;padding:2px 0">🟢 {r.get("Nombre tienda","")} <span style="color:#999">({fapert})</span></div>', unsafe_allow_html=True)
         st.caption("Usa esta sección para decidir qué tiendas priorizar o descartar al planificar el calendario de auditorías del período.")
 
+    # ─────────────────────────────────────────────
+    # COBERTURA DE AUDITORÍA — % de la red activa auditada en los últimos
+    # 90/180 días. KPI de cumplimiento de plan, distinto del resultado
+    # financiero: aquí importa si se está auditando a tiempo, no cuánto
+    # se encontró.
+    # ─────────────────────────────────────────────
+    cobertura = tiendas_info.get("cobertura")
+    st.markdown('<div class="section-title">Cobertura de Auditoría</div>', unsafe_allow_html=True)
+    if cobertura is None:
+        st.info("Sube el config de tiendas (o usa el histórico con la hoja 'Tiendas') para calcular cobertura.")
+    else:
+        col_cov1, col_cov2, col_cov3 = st.columns([1, 1, 2])
+        with col_cov1:
+            color_cov90 = C_GREEN if cobertura["pct_90d"] >= 80 else C_AMBER if cobertura["pct_90d"] >= 50 else C_RED
+            st.markdown(f'<div class="kpi-card" style="border-top-color:{color_cov90}"><div class="kpi-label">Auditadas últimos 90 días</div><div class="kpi-value" style="color:{color_cov90}">{cobertura["pct_90d"]:.1f}%</div><div class="kpi-sub">{cobertura["n_auditadas_90d"]} de {cobertura["n_activas"]} tiendas activas</div></div>', unsafe_allow_html=True)
+        with col_cov2:
+            color_cov180 = C_GREEN if cobertura["pct_180d"] >= 90 else C_AMBER if cobertura["pct_180d"] >= 70 else C_RED
+            st.markdown(f'<div class="kpi-card" style="border-top-color:{color_cov180}"><div class="kpi-label">Auditadas últimos 180 días</div><div class="kpi-value" style="color:{color_cov180}">{cobertura["pct_180d"]:.1f}%</div><div class="kpi-sub">{cobertura["n_auditadas_180d"]} de {cobertura["n_activas"]} tiendas activas</div></div>', unsafe_allow_html=True)
+        with col_cov3:
+            n_pend = len(cobertura["pendientes_90d"])
+            st.markdown(f'<div class="kpi-card" style="border-top-color:{C_PURPLE}"><div class="kpi-label">Pendientes de auditar (+90 días)</div><div class="kpi-value neg">{n_pend}</div><div class="kpi-sub">tiendas activas sin visita reciente</div></div>', unsafe_allow_html=True)
+        if n_pend > 0:
+            with st.expander(f"Ver las {n_pend} tiendas activas pendientes de auditar (+90 días)"):
+                tabla_pend = cobertura["pendientes_90d"].copy()
+                tabla_pend["DÍAS SIN AUDITAR"] = tabla_pend["DÍAS SIN AUDITAR"].apply(
+                    lambda d: "Nunca auditada" if d >= 99999 else f"{int(d)} días")
+                st.dataframe(tabla_pend, use_container_width=True, hide_index=True)
+
+    # ─────────────────────────────────────────────
+    # RESULTADO POR SOCIEDAD — corte ejecutivo de más alto nivel (entidad
+    # legal: MOTSUR, ECUACYCLO, LAMITEX, GERARDO ORTIZ), previo a bajar a
+    # línea de negocio.
+    # ─────────────────────────────────────────────
+    if "SOCIEDAD" in dff.columns:
+        st.markdown('<div class="section-title">Resultado por Sociedad</div>', unsafe_allow_html=True)
+        soc_agg = dff.groupby("SOCIEDAD").agg(
+            auditorias=("No.", "count"),
+            inv_total=("TOTAL INVENTARIO COSTO", "sum"),
+            cobrar=("RESULT. A COBRAR COSTO", "sum"),
+        ).reset_index().sort_values("cobrar")
+        col_soc1, col_soc2 = st.columns([1.4, 1])
+        with col_soc1:
+            colors_soc = [C_RED if v < -1000 else C_AMBER if v < 0 else C_GREEN for v in soc_agg["cobrar"]]
+            fig_soc = go.Figure(go.Bar(x=soc_agg["cobrar"], y=soc_agg["SOCIEDAD"], orientation="h",
+                                       marker_color=colors_soc,
+                                       text=[fmt_money(v) for v in soc_agg["cobrar"]], textposition="outside"))
+            fig_soc.update_layout(height=220, plot_bgcolor="white", paper_bgcolor="white",
+                                  margin=dict(l=0,r=80,t=10,b=0),
+                                  xaxis=dict(tickprefix="$", showgrid=True, gridcolor="#f0f0f0"),
+                                  yaxis=dict(autorange="reversed"))
+            st.plotly_chart(fig_soc, use_container_width=True)
+        with col_soc2:
+            tabla_soc = soc_agg.copy()
+            tabla_soc.columns = ["Sociedad","Auditorías","Inventario","A Cobrar Costo"]
+            tabla_soc["Inventario"]     = tabla_soc["Inventario"].apply(fmt_money)
+            tabla_soc["A Cobrar Costo"] = tabla_soc["A Cobrar Costo"].apply(fmt_money)
+            st.dataframe(tabla_soc, use_container_width=True, hide_index=True)
+
     st.markdown('<div class="section-title">Tendencia Mensual</div>', unsafe_allow_html=True)
     col_l, col_r = st.columns([2, 1])
     with col_l:
@@ -798,8 +966,23 @@ with tabs[1]:
     aud_agg = dff_aud.groupby(["AUDITOR","TIPO_AUDITOR"]).agg(
         auditorias=("No.","count"),
         cobrar=("RESULT. A COBRAR COSTO","sum"),
+        cobrado=("VALOR COBRADO","sum"),
         score_prom=("SCORE (0/100)","mean"),
+        tiendas_auditadas=("ALMACÉN","nunique"),
     ).reset_index().sort_values("auditorias", ascending=False)
+    aud_agg["pct_recuperado"] = aud_agg.apply(
+        lambda r: (r["cobrado"] / abs(r["cobrar"]) * 100) if r["cobrar"] != 0 else 0, axis=1)
+
+    # ── Carga de trabajo: tiendas asignadas (config) vs. tiendas auditadas ──
+    if df_config_tiendas is not None and "Auditor responsable" in df_config_tiendas.columns:
+        asignadas_df = df_config_tiendas[df_config_tiendas["Estado"] == "ACTIVA"].copy()
+        asignadas_df["_AUD_NORM"] = asignadas_df["Auditor responsable"].apply(normalizar_auditor)
+        asignadas = asignadas_df.groupby("_AUD_NORM").size().rename("tiendas_asignadas")
+        aud_agg["_AUD_NORM"] = aud_agg["AUDITOR"].apply(normalizar_auditor)
+        aud_agg = aud_agg.merge(asignadas, left_on="_AUD_NORM", right_index=True, how="left")
+        aud_agg["tiendas_asignadas"] = aud_agg["tiendas_asignadas"].fillna(0).astype(int)
+    else:
+        aud_agg["tiendas_asignadas"] = 0
 
     bg_colors = ["#E6F1FB","#EAF3DE","#FAEEDA","#EEEDFE"]
     fg_colors = ["#0C447C","#27500A","#633806","#3C3489"]
@@ -845,8 +1028,37 @@ with tabs[1]:
         fig2.update_traces(textposition="outside")
         st.plotly_chart(fig2, use_container_width=True)
 
+    # ─────────────────────────────────────────────
+    # COSTO-BENEFICIO Y CARGA DE TRABAJO
+    # Responde: ¿cuánto se recupera por lo detectado? ¿algún auditor tiene
+    # más tiendas asignadas de las que alcanza a cubrir?
+    # ─────────────────────────────────────────────
+    st.markdown('<div class="section-title">Costo-Beneficio y Carga de Trabajo</div>', unsafe_allow_html=True)
+    pct_rec_total = (aud_agg["cobrado"].sum() / abs(aud_agg["cobrar"].sum()) * 100) if aud_agg["cobrar"].sum() != 0 else 0
+    n_sobrecarga = (aud_agg["tiendas_asignadas"] > 0).sum() and (aud_agg["tiendas_auditadas"] < aud_agg["tiendas_asignadas"] * 0.5).sum()
+    col_cb1, col_cb2, col_cb3 = st.columns(3)
+    col_cb1.markdown(f'<div class="kpi-card" style="border-top-color:{C_GREEN}"><div class="kpi-label">% Recuperado del Total Detectado</div><div class="kpi-value {"pos" if pct_rec_total>0 else "neu"}">{pct_rec_total:.1f}%</div><div class="kpi-sub">{fmt_money(aud_agg["cobrado"].sum())} cobrado</div></div>', unsafe_allow_html=True)
+    col_cb2.markdown(f'<div class="kpi-card" style="border-top-color:{C_BLUE}"><div class="kpi-label">$ Recuperado / Auditoría</div><div class="kpi-value neu">{fmt_money(aud_agg["cobrado"].sum() / aud_agg["auditorias"].sum() if aud_agg["auditorias"].sum() else 0)}</div><div class="kpi-sub">promedio del período</div></div>', unsafe_allow_html=True)
+    col_cb3.markdown(f'<div class="kpi-card" style="border-top-color:{C_AMBER}"><div class="kpi-label">Auditores con Baja Cobertura</div><div class="kpi-value neg">{n_sobrecarga}</div><div class="kpi-sub">cubren &lt;50% de sus tiendas asignadas</div></div>', unsafe_allow_html=True)
+
+    tabla_carga = aud_agg[["AUDITOR","TIPO_AUDITOR","tiendas_asignadas","tiendas_auditadas",
+                           "auditorias","cobrar","cobrado","pct_recuperado"]].copy()
+    tabla_carga["% Cobertura Tiendas"] = tabla_carga.apply(
+        lambda r: f"{(r['tiendas_auditadas']/r['tiendas_asignadas']*100):.0f}%" if r["tiendas_asignadas"] > 0 else "s/d", axis=1)
+    tabla_carga["% Recuperado"] = tabla_carga["pct_recuperado"].apply(lambda v: f"{v:.1f}%")
+    tabla_carga["A Cobrar Costo"] = tabla_carga["cobrar"].apply(fmt_money)
+    tabla_carga["Cobrado"]        = tabla_carga["cobrado"].apply(fmt_money)
+    tabla_carga = tabla_carga[["AUDITOR","TIPO_AUDITOR","tiendas_asignadas","tiendas_auditadas",
+                                "% Cobertura Tiendas","auditorias","A Cobrar Costo","Cobrado","% Recuperado"]]
+    tabla_carga.columns = ["Auditor","Tipo","Tiendas Asignadas","Tiendas Auditadas",
+                            "% Cobertura Tiendas","Auditorías","A Cobrar Costo","Cobrado","% Recuperado"]
+    st.dataframe(tabla_carga, use_container_width=True, hide_index=True)
+    st.caption("Tiendas Asignadas viene de la hoja 'Tiendas' (Auditor responsable, solo activas). '% Recuperado' = Cobrado / A Cobrar Costo detectado.")
+    download_button_excel(tabla_carga, f"carga_trabajo_auditores_{datetime.today().strftime('%Y%m%d')}.xlsx",
+                          "⬇ Exportar carga de trabajo", money_cols=["A Cobrar Costo","Cobrado"])
+
     st.markdown('<div class="section-title">Tabla Resumen por Auditor</div>', unsafe_allow_html=True)
-    tabla_aud = aud_agg.copy()
+    tabla_aud = aud_agg[["AUDITOR","TIPO_AUDITOR","auditorias","cobrar","score_prom"]].copy()
     tabla_aud.columns = ["Auditor","Tipo","Auditorías","A Cobrar Costo","Score Prom."]
     tabla_aud["A Cobrar Costo"] = tabla_aud["A Cobrar Costo"].apply(fmt_money)
     tabla_aud["Score Prom."]    = tabla_aud["Score Prom."].round(1)
@@ -856,7 +1068,7 @@ with tabs[1]:
     tabla_aud_full = pd.concat([tabla_aud, tot_aud], ignore_index=True)
     st.dataframe(tabla_aud_full, use_container_width=True, hide_index=True)
     download_button_excel(tabla_aud_full, f"auditores_{datetime.today().strftime('%Y%m%d')}.xlsx",
-                          "⬇ Exportar tabla auditores")
+                          "⬇ Exportar tabla auditores", money_cols=["A Cobrar Costo"])
 
 # ═══════════════════════════════════════════════
 # PÁGINA 03 — LÍNEAS DE NEGOCIO
@@ -938,7 +1150,8 @@ with tabs[2]:
     tabla_linea_full = pd.concat([tabla_linea, tot_lin], ignore_index=True)
     st.dataframe(tabla_linea_full, use_container_width=True, hide_index=True)
     download_button_excel(tabla_linea_full, f"lineas_{datetime.today().strftime('%Y%m%d')}.xlsx",
-                          "⬇ Exportar tabla líneas")
+                          "⬇ Exportar tabla líneas",
+                          money_cols=["Inv. Total","Faltante Costo","Sobrante Costo","A Cobrar Costo"])
 
 
 # ═══════════════════════════════════════════════
@@ -947,8 +1160,13 @@ with tabs[2]:
 with tabs[3]:
     st.markdown('<div class="section-title">Mapa de Calor — Todas las Tiendas</div>', unsafe_allow_html=True)
 
-    # Filtro de rango de semáforo
-    heat_col1, heat_col2, heat_col3 = st.columns([1,1,2])
+    # Filtro de rango de semáforo + métrica de color del treemap
+    heat_col0, heat_col1, heat_col2, heat_col3 = st.columns([1.3,1,1,2])
+    with heat_col0:
+        metrica_color = st.selectbox(
+            "Colorear por", ["A Cobrar (Costo)", "Score de Riesgo"],
+            help="Cambia qué variable define el color de cada tienda en el mapa"
+        )
     with heat_col1:
         rango_min = st.number_input("Umbral rojo (desde)", value=-5000, step=500,
                                     help="Valores menores a este umbral se marcan en rojo")
@@ -965,16 +1183,39 @@ with tabs[3]:
     heat_df = dff.copy()
     heat_df["COBRAR_COSTO"] = pd.to_numeric(heat_df.get("RESULT. A COBRAR COSTO", 0),
                                               errors="coerce").fillna(0)
+    heat_df["SCORE_NUM"]    = pd.to_numeric(heat_df.get("SCORE (0/100)", 0), errors="coerce").fillna(0)
+
+    if metrica_color == "A Cobrar (Costo)":
+        color_col, color_scale, color_mid, color_titulo = (
+            "COBRAR_COSTO", ["#E24B4A","#EF9F27","#FFFF88","#639922"], rango_min / 2, "A Cobrar Costo")
+    else:
+        color_col, color_scale, color_mid, color_titulo = (
+            "SCORE_NUM", ["#639922","#FFFF88","#EF9F27","#E24B4A"], 50, "Score de Riesgo")
 
     fig = px.treemap(heat_df, path=[px.Constant("Todas"), "ZONA","LÍNEA","ALMACÉN"],
                      values="TOTAL INVENTARIO COSTO",
-                     color="COBRAR_COSTO",
-                     color_continuous_scale=["#E24B4A","#EF9F27","#FFFF88","#639922"],
-                     color_continuous_midpoint=rango_min / 2,
-                     hover_data={"COBRAR_COSTO":":.2f","SCORE (0/100)":":.1f"})
+                     color=color_col,
+                     color_continuous_scale=color_scale,
+                     color_continuous_midpoint=color_mid,
+                     hover_data={"COBRAR_COSTO":":$,.2f","SCORE (0/100)":":.1f"})
     fig.update_layout(height=420, margin=dict(l=0,r=0,t=10,b=0),
-                      coloraxis_colorbar=dict(title="A Cobrar Costo", tickprefix="$"))
+                      coloraxis_colorbar=dict(title=color_titulo,
+                                              tickprefix="$" if color_col == "COBRAR_COSTO" else ""))
     st.plotly_chart(fig, use_container_width=True)
+
+    # Foco rápido: las 5 tiendas más críticas del período, para lectura gerencial directa
+    top_criticas = heat_df.nsmallest(5, "COBRAR_COSTO")[["ALMACÉN","ZONA","COBRAR_COSTO","SCORE_NUM"]]
+    if len(top_criticas) > 0 and top_criticas["COBRAR_COSTO"].min() < 0:
+        st.markdown('<div class="section-title">🔴 Focos Rojos — Top 5 del Período</div>', unsafe_allow_html=True)
+        cols_focos = st.columns(len(top_criticas))
+        for i, (_, r) in enumerate(top_criticas.iterrows()):
+            with cols_focos[i]:
+                st.markdown(f"""<div class="kpi-card" style="border-top-color:{C_RED};padding:10px">
+                  <div style="font-size:11px;font-weight:600;color:#1a1a2e">{r['ALMACÉN'][:22]}</div>
+                  <div style="font-size:10px;color:#999">{r['ZONA']}</div>
+                  <div style="font-size:15px;font-weight:700;color:{C_RED};margin-top:4px">{fmt_money(r['COBRAR_COSTO'])}</div>
+                  <div style="font-size:10px;color:#999">Score {r['SCORE_NUM']:.0f}</div>
+                </div>""", unsafe_allow_html=True)
 
     tabla_heat = heat_df[["ALMACÉN","ZONA","LÍNEA","COBRAR_COSTO",
                            "TOTAL INVENTARIO COSTO","SCORE (0/100)","RIESGO_NORM"]].copy()
@@ -1001,12 +1242,19 @@ with tabs[3]:
         "Inventario Costo": heat_df["TOTAL INVENTARIO COSTO"].sum(),
         "Score": round(heat_df["SCORE (0/100)"].mean(),1), "Riesgo":"—"}])
     tabla_heat_full = pd.concat([tabla_heat, tot_h], ignore_index=True)
+    # FIX: antes esta tabla mostraba los montos en crudo (ej. "-1234.5678")
+    # en vez de "$-1,234.57", inconsistente con el resto del dashboard.
+    # Se usa Styler.format para mostrarlo en dólares con 2 decimales sin
+    # perder el tipo numérico (necesario para que el semáforo de color siga
+    # funcionando y para que la tabla se pueda ordenar correctamente).
     st.dataframe(
-        tabla_heat_full.style.map(color_costo, subset=["A Cobrar Costo"]),
+        tabla_heat_full.style
+            .map(color_costo, subset=["A Cobrar Costo"])
+            .format({"A Cobrar Costo": "${:,.2f}", "Inventario Costo": "${:,.2f}", "Score": "{:.1f}"}),
         use_container_width=True, hide_index=True
     )
     download_button_excel(tabla_heat_full, f"mapa_calor_{datetime.today().strftime('%Y%m%d')}.xlsx",
-                          "⬇ Exportar tabla tiendas")
+                          "⬇ Exportar tabla tiendas", money_cols=["A Cobrar Costo","Inventario Costo"])
 
 # ═══════════════════════════════════════════════
 # PÁGINA 05 — PERFIL DE TIENDA
@@ -1027,11 +1275,14 @@ with tabs[4]:
     t_linea  = tienda_df["LÍNEA"].iloc[0] if len(tienda_df) > 0 else "-"
     rcolor   = C_RED if "ALTO" in str(t_riesgo) or "CRÍT" in str(t_riesgo) else C_AMBER if "MEDIO" in str(t_riesgo) else C_GREEN
 
-    c1,c2,c3,c4 = st.columns(4)
+    c1,c2,c3,c4,c5 = st.columns(5)
     c1.markdown(f'<div class="kpi-card" style="border-top-color:{C_BLUE}"><div class="kpi-label">Inventario Auditado</div><div class="kpi-value neu">{fmt_money(t_inv)}</div><div class="kpi-sub">{t_zona} · {t_linea}</div></div>', unsafe_allow_html=True)
     c2.markdown(f'<div class="kpi-card" style="border-top-color:{C_RED}"><div class="kpi-label">A Cobrar (Costo)</div><div class="kpi-value neg">{fmt_money(t_cobrar)}</div><div class="kpi-sub">{len(tienda_df)} auditoría(s)</div></div>', unsafe_allow_html=True)
     c3.markdown(f'<div class="kpi-card" style="border-top-color:{C_AMBER}"><div class="kpi-label">Costo Neto</div><div class="kpi-value neg">{fmt_money(t_neto)}</div><div class="kpi-sub">Faltante (Costo): {fmt_money(t_falt)}</div></div>', unsafe_allow_html=True)
     c4.markdown(f'<div class="kpi-card" style="border-top-color:{rcolor}"><div class="kpi-label">Score de Riesgo</div><div class="kpi-value" style="color:{rcolor}">{t_score:.1f} / 100</div><div class="kpi-sub">Clasificación: {t_riesgo}</div></div>', unsafe_allow_html=True)
+    t_reinc  = int(last_audit.loc[last_audit["ALMACÉN"] == sel_tienda, "REINCIDENCIA_12M"].sum()) if sel_tienda in last_audit["ALMACÉN"].values else 0
+    color_reinc = C_RED if t_reinc >= 3 else C_AMBER if t_reinc >= 1 else C_GREEN
+    c5.markdown(f'<div class="kpi-card" style="border-top-color:{color_reinc}"><div class="kpi-label">Reincidencia (12M)</div><div class="kpi-value" style="color:{color_reinc}">{t_reinc}</div><div class="kpi-sub">veces en ALTO/CRÍTICO</div></div>', unsafe_allow_html=True)
 
     col_g, col_c = st.columns([2,1])
     with col_g:
@@ -1106,7 +1357,8 @@ with tabs[4]:
     st.dataframe(tabla_t_full.style.apply(_resaltar_total, axis=1),
                  use_container_width=True, hide_index=True)
     download_button_excel(tabla_t_full, f"tienda_{sel_tienda.replace(' ','_')[:30]}_{datetime.today().strftime('%Y%m%d')}.xlsx",
-                          "⬇ Exportar historial de tienda")
+                          "⬇ Exportar historial de tienda",
+                          money_cols=["Inventario","Faltante Costo","Sobrante Costo","A Cobrar Costo","Costo Neto"])
 
 
 # ═══════════════════════════════════════════════
@@ -1176,7 +1428,7 @@ with tabs[5]:
     tabla_sku_full = pd.concat([tabla_sku, tot_sku], ignore_index=True)
     st.dataframe(tabla_sku_full, use_container_width=True, hide_index=True)
     download_button_excel(tabla_sku_full, f"skus_{datetime.today().strftime('%Y%m%d')}.xlsx",
-                          "⬇ Exportar SKUs")
+                          "⬇ Exportar SKUs", money_cols=["COSTO UNITARIO","COSTO TOTAL"])
 
 # ═══════════════════════════════════════════════
 # PÁGINA 07 — PRIORIDADES IA
@@ -1269,16 +1521,18 @@ with tabs[6]:
 
     st.markdown('<div class="section-title">Tabla Completa de Prioridades</div>', unsafe_allow_html=True)
     tabla_ia = ia_top[["ALMACÉN","ZONA","LÍNEA","DÍAS SIN AUDITAR","SCORE (0/100)",
-                        "RESULT. A COBRAR COSTO","RIESGO_NORM","PRIORIDAD_SCORE","RECOMENDACIÓN"]].copy()
+                        "RESULT. A COBRAR COSTO","REINCIDENCIA_12M","RIESGO_NORM",
+                        "PRIORIDAD_SCORE","RECOMENDACIÓN"]].copy()
     tabla_ia["RESULT. A COBRAR COSTO"] = tabla_ia["RESULT. A COBRAR COSTO"].apply(fmt_money)
     tabla_ia["PRIORIDAD_SCORE"]   = tabla_ia["PRIORIDAD_SCORE"].round(1)
     tabla_ia["SCORE (0/100)"]     = tabla_ia["SCORE (0/100)"].round(1)
     tabla_ia["DÍAS SIN AUDITAR"]  = tabla_ia["DÍAS SIN AUDITAR"].astype(int)
     tabla_ia.columns = ["Almacén","Zona","Línea","Días s/auditar",
-                         "Score","A Cobrar Costo","Riesgo","Score IA","Recomendación"]
+                         "Score","A Cobrar Costo","Reincid. 12M","Riesgo","Score IA","Recomendación"]
+    st.caption("Reincid. 12M = veces que la tienda ha salido en riesgo ALTO o CRÍTICO en los últimos 12 meses — distingue una caída puntual de un problema estructural.")
     st.dataframe(tabla_ia, use_container_width=True, hide_index=True)
     download_button_excel(tabla_ia, f"prioridades_ia_{datetime.today().strftime('%Y%m%d')}.xlsx",
-                          "⬇ Exportar prioridades IA")
+                          "⬇ Exportar prioridades IA", money_cols=["A Cobrar Costo"])
 
 
 # ═══════════════════════════════════════════════
@@ -1289,13 +1543,20 @@ with tabs[7]:
 
     # Filtro local por línea — independiente del filtro global del sidebar,
     # permite comparar varias líneas a la vez dentro de esta pestaña.
+    # FIX: antes venía con TODAS las líneas preseleccionadas por defecto,
+    # lo que llenaba el campo de etiquetas y no se veía como un desplegable
+    # limpio. Ahora arranca vacío (= "todas las líneas") y solo se llena
+    # de etiquetas cuando el usuario elige líneas específicas para comparar.
     lineas_disp_tend = sorted(dff["LÍNEA"].dropna().unique().tolist())
-    sel_lineas_tend = st.multiselect("Filtrar por línea (Tendencia)", lineas_disp_tend,
-                                      default=lineas_disp_tend, key="tendencia_filtro_linea")
-    dff_tend = dff[dff["LÍNEA"].isin(sel_lineas_tend)] if sel_lineas_tend else dff.iloc[0:0]
+    sel_lineas_tend = st.multiselect(
+        "Filtrar por línea (Tendencia)", lineas_disp_tend,
+        default=[], placeholder="Todas las líneas — haz clic para elegir específicas",
+        key="tendencia_filtro_linea"
+    )
+    dff_tend = dff[dff["LÍNEA"].isin(sel_lineas_tend)] if sel_lineas_tend else dff
 
     if len(dff_tend) == 0:
-        st.info("Selecciona al menos una línea para ver la tendencia mensual.")
+        st.info("No hay datos para las líneas seleccionadas.")
         st.stop()
 
     mes_agg = dff_tend.groupby("MES").agg(
@@ -1367,6 +1628,51 @@ with tabs[7]:
     fig4.update_traces(line=dict(width=2), marker=dict(size=7))
     st.plotly_chart(fig4, use_container_width=True)
 
+    # ─────────────────────────────────────────────
+    # COMPARACIÓN INTERANUAL — mismo mes vs. año anterior. Usa dff_base
+    # (respeta los filtros del sidebar, pero NO el rango de fechas elegido
+    # arriba) para poder comparar contra el año anterior aunque el período
+    # seleccionado no lo incluya.
+    # ─────────────────────────────────────────────
+    st.markdown('<div class="section-title">Comparación Interanual (Mismo Mes vs. Año Anterior)</div>', unsafe_allow_html=True)
+    base_tend = dff_base[dff_base["LÍNEA"].isin(sel_lineas_tend)] if sel_lineas_tend else dff_base
+    yoy = base_tend.copy()
+    yoy["AÑO"] = yoy["FECHA AUDITORÍA"].dt.year
+    yoy["MES_NUM"] = yoy["FECHA AUDITORÍA"].dt.month
+    yoy_agg = yoy.groupby(["AÑO", "MES_NUM"]).agg(
+        cobrar_costo=("RESULT. A COBRAR COSTO", "sum"),
+        auditorias=("No.", "count"),
+    ).reset_index()
+    anios_disp = sorted(yoy_agg["AÑO"].dropna().unique().tolist())
+    if len(anios_disp) < 2:
+        st.info("Se necesita historial de al menos 2 años para la comparación interanual.")
+    else:
+        meses_nombre = ["Ene","Feb","Mar","Abr","May","Jun","Jul","Ago","Sep","Oct","Nov","Dic"]
+        fig_yoy = go.Figure()
+        colores_anio = [C_TEAL, C_NAVY, C_PURPLE, C_AMBER]
+        for i, anio in enumerate(anios_disp[-3:]):  # últimos 3 años como máximo, para no saturar
+            serie = yoy_agg[yoy_agg["AÑO"] == anio].set_index("MES_NUM").reindex(range(1, 13))
+            fig_yoy.add_scatter(x=meses_nombre, y=serie["cobrar_costo"].abs(),
+                                name=str(int(anio)), mode="lines+markers",
+                                line=dict(width=2.5, color=colores_anio[i % len(colores_anio)]),
+                                marker=dict(size=7))
+        fig_yoy.update_layout(height=300, plot_bgcolor="white", paper_bgcolor="white",
+                              margin=dict(l=0,r=0,t=10,b=0), legend=dict(orientation="h", y=-0.2),
+                              xaxis=dict(showgrid=False),
+                              yaxis=dict(showgrid=True, gridcolor="#f0f0f0", tickprefix="$"))
+        st.plotly_chart(fig_yoy, use_container_width=True)
+
+        anio_actual_yoy, anio_anterior_yoy = anios_disp[-1], anios_disp[-2]
+        mes_max_actual = int(yoy_agg[yoy_agg["AÑO"] == anio_actual_yoy]["MES_NUM"].max())
+        acum_actual   = yoy_agg[(yoy_agg["AÑO"] == anio_actual_yoy) & (yoy_agg["MES_NUM"] <= mes_max_actual)]["cobrar_costo"].sum()
+        acum_anterior = yoy_agg[(yoy_agg["AÑO"] == anio_anterior_yoy) & (yoy_agg["MES_NUM"] <= mes_max_actual)]["cobrar_costo"].sum()
+        var_pct = ((abs(acum_actual) - abs(acum_anterior)) / abs(acum_anterior) * 100) if acum_anterior != 0 else 0
+        color_var = C_RED if var_pct > 0 else C_GREEN
+        col_yoy1, col_yoy2, col_yoy3 = st.columns(3)
+        col_yoy1.markdown(f'<div class="kpi-card" style="border-top-color:{C_BLUE}"><div class="kpi-label">Acumulado Ene-{meses_nombre[mes_max_actual-1]} {anio_actual_yoy}</div><div class="kpi-value neg">{fmt_money(acum_actual)}</div></div>', unsafe_allow_html=True)
+        col_yoy2.markdown(f'<div class="kpi-card" style="border-top-color:{C_TEAL}"><div class="kpi-label">Mismo período {anio_anterior_yoy}</div><div class="kpi-value neg">{fmt_money(acum_anterior)}</div></div>', unsafe_allow_html=True)
+        col_yoy3.markdown(f'<div class="kpi-card" style="border-top-color:{color_var}"><div class="kpi-label">Variación</div><div class="kpi-value" style="color:{color_var}">{"+" if var_pct>0 else ""}{var_pct:.1f}%</div><div class="kpi-sub">{"empeoró" if var_pct>0 else "mejoró"} vs. año anterior</div></div>', unsafe_allow_html=True)
+
     st.markdown('<div class="section-title">Tabla Resumen Mensual</div>', unsafe_allow_html=True)
     tabla_mes = mes_agg[["mes_label","auditorias","inventario","faltantes",
                            "sobrantes","cobrar_costo","mal_estado","score_prom"]].copy()
@@ -1385,7 +1691,8 @@ with tabs[7]:
     tabla_mes_full = pd.concat([tabla_mes, tot_m], ignore_index=True)
     st.dataframe(tabla_mes_full, use_container_width=True, hide_index=True)
     download_button_excel(tabla_mes_full, f"tendencia_mensual_{datetime.today().strftime('%Y%m%d')}.xlsx",
-                          "⬇ Exportar tendencia mensual")
+                          "⬇ Exportar tendencia mensual",
+                          money_cols=["Inventario","Faltante Costo","Sobrante Costo","A Cobrar Costo","Mal Estado Costo"])
 
 # ═══════════════════════════════════════════════
 # PÁGINA 09 — GESTIÓN DE COBRO
@@ -1446,6 +1753,48 @@ with tabs[8]:
     c6.markdown(f'<div class="kpi-card" style="border-top-color:{C_GREEN}"><div class="kpi-label">Procesado - Cobrado</div><div class="kpi-value pos">{n_procesado}</div><div class="kpi-sub">Ciclo completo</div></div>', unsafe_allow_html=True)
     c7.markdown(f'<div class="kpi-card" style="border-top-color:{C_AMBER}"><div class="kpi-label">Pasado a RRHH</div><div class="kpi-value neg">{n_rrhh}</div><div class="kpi-sub">En proceso de descuento</div></div>', unsafe_allow_html=True)
     c8.markdown(f'<div class="kpi-card" style="border-top-color:{C_TEAL}"><div class="kpi-label">En Aprobación Ajustes</div><div class="kpi-value neu">{n_aprobacion}</div><div class="kpi-sub">Esperando aprobación</div></div>', unsafe_allow_html=True)
+
+    # ─────────────────────────────────────────────
+    # ANTIGÜEDAD DEL COBRO PENDIENTE (AGING)
+    # No basta con saber CUÁNTO falta cobrar — importa hace CUÁNTO está
+    # pendiente. Esto es lo que normalmente dispara la decisión de escalar
+    # a RRHH o a gerencia directa.
+    # ─────────────────────────────────────────────
+    st.markdown('<div class="section-title">Antigüedad del Cobro Pendiente (Aging)</div>', unsafe_allow_html=True)
+    pend_df = dff_c[dff_c["ESTADO COBRO"] == "Pendiente"].copy()
+    if len(pend_df) == 0:
+        st.success("No hay pendientes de cobro en el período seleccionado.")
+    else:
+        TODAY_C = pd.Timestamp("today").normalize()
+        pend_df["DÍAS PENDIENTE"] = (TODAY_C - pend_df["FECHA AUDITORÍA"]).dt.days
+        buckets = ["0-30 días", "31-60 días", "61-90 días", "+90 días"]
+        pend_df["ANTIGÜEDAD"] = pd.cut(pend_df["DÍAS PENDIENTE"], bins=[-1, 30, 60, 90, 10**6], labels=buckets)
+        aging_agg = (pend_df.groupby("ANTIGÜEDAD", observed=False)
+                     .agg(n=("ALMACÉN", "count"), monto=("RESULT. A COBRAR COSTO", "sum"))
+                     .reindex(buckets).fillna(0))
+
+        col_ag1, col_ag2 = st.columns([1.3, 1])
+        with col_ag1:
+            colors_ag = [C_GREEN, C_AMBER, "#D85A30", C_RED]
+            fig_ag = go.Figure(go.Bar(x=buckets, y=aging_agg["monto"].abs(),
+                                      marker_color=colors_ag,
+                                      text=[fmt_money(v) for v in aging_agg["monto"]], textposition="outside"))
+            fig_ag.update_layout(height=260, plot_bgcolor="white", paper_bgcolor="white",
+                                 margin=dict(l=0,r=0,t=10,b=0),
+                                 yaxis=dict(tickprefix="$", showgrid=True, gridcolor="#f0f0f0"))
+            st.plotly_chart(fig_ag, use_container_width=True)
+        with col_ag2:
+            tabla_aging = aging_agg.reset_index().rename(
+                columns={"ANTIGÜEDAD": "Antigüedad", "n": "Auditorías", "monto": "A Cobrar Costo"})
+            tabla_aging["Auditorías"] = tabla_aging["Auditorías"].astype(int)
+            tabla_aging["A Cobrar Costo"] = tabla_aging["A Cobrar Costo"].apply(fmt_money)
+            st.dataframe(tabla_aging, use_container_width=True, hide_index=True)
+            download_button_excel(tabla_aging, f"aging_cobro_{datetime.today().strftime('%Y%m%d')}.xlsx",
+                                  "⬇ Exportar aging", money_cols=["A Cobrar Costo"])
+
+        n_critico_aging = int(aging_agg.loc["+90 días", "n"])
+        if n_critico_aging > 0:
+            st.warning(f"⚠️ {n_critico_aging} auditoría(s) llevan más de 90 días pendientes de cobro — candidatas a escalar a RRHH o a revisión gerencial directa.")
 
     st.markdown('<div class="section-title">Estado de Cobro y Distribución</div>', unsafe_allow_html=True)
     col_l, col_r = st.columns(2)
@@ -1636,4 +1985,5 @@ with tabs[8]:
     st.dataframe(tabla_cobro_full, use_container_width=True, hide_index=True)
     download_button_excel(tabla_cobro_full,
                           f"gestion_cobro_{datetime.today().strftime('%Y%m%d')}.xlsx",
-                          "⬇ Exportar gestión de cobro")
+                          "⬇ Exportar gestión de cobro",
+                          money_cols=["RESULT. A COBRAR COSTO","TOTAL COSTO NETO","VALOR COBRADO"])
