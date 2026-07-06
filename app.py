@@ -902,7 +902,7 @@ with tabs[1]:
     n_sobrecarga = (aud_agg["tiendas_asignadas"] > 0).sum() and (aud_agg["tiendas_auditadas"] < aud_agg["tiendas_asignadas"] * 0.5).sum()
     col_cb1, col_cb2, col_cb3 = st.columns(3)
     col_cb1.markdown(f'<div class="kpi-card" style="border-top-color:{C_GREEN}"><div class="kpi-label">% Recuperado del Total Detectado</div><div class="kpi-value {"pos" if pct_rec_total>0 else "neu"}">{pct_rec_total:.1f}%</div><div class="kpi-sub">{fmt_money(aud_agg["cobrado"].sum())} cobrado</div></div>', unsafe_allow_html=True)
-    tarjeta_kpi(col_cb2, "$ Recuperado / Auditoría", f"{fmt_money(aud_agg["cobrado"].sum() / aud_agg["auditorias"].sum() if aud_agg["auditorias"].sum() else 0)}", C_BLUE, "promedio del período")
+    tarjeta_kpi(col_cb2, "$ Recuperado / Auditoría", f"{fmt_money(aud_agg['cobrado'].sum() / aud_agg['auditorias'].sum() if aud_agg['auditorias'].sum() else 0)}", C_BLUE, "promedio del período")
     tarjeta_kpi(col_cb3, "Auditores con Baja Cobertura", f"{n_sobrecarga}", C_AMBER, "cubren &lt;50% de sus tiendas asignadas", clase_valor="neg")
 
     tabla_carga = aud_agg[[COL_AUDITOR,COL_TIPO_AUDITOR,"tiendas_asignadas","tiendas_auditadas",
@@ -955,7 +955,7 @@ with tabs[2]:
     c1.markdown(f'<div class="kpi-card" style="border-top-color:{C_RED}"><div class="kpi-label">Mayor Pérdida</div><div class="kpi-value neg" style="font-size:18px">{worst[COL_LINEA]}</div><div class="kpi-sub">{fmt_money(worst["cobrar"])} a cobrar (costo)</div></div>', unsafe_allow_html=True)
     c2.markdown(f'<div class="kpi-card" style="border-top-color:{C_GREEN}"><div class="kpi-label">Mejor Resultado</div><div class="kpi-value pos" style="font-size:18px">{best[COL_LINEA]}</div><div class="kpi-sub">{fmt_money(best["cobrar"])} a cobrar (costo)</div></div>', unsafe_allow_html=True)
     c3.markdown(f'<div class="kpi-card" style="border-top-color:{C_AMBER}"><div class="kpi-label">Score Más Alto</div><div class="kpi-value neg" style="font-size:18px">{high_score[COL_LINEA]}</div><div class="kpi-sub">Score prom. {high_score["score_prom"]:.1f} / 100</div></div>', unsafe_allow_html=True)
-    tarjeta_kpi(c4, "Líneas Auditadas", f"{len(linea_agg)}", C_BLUE, f"{int(linea_agg["auditorias"].sum())} auditorías totales")
+    tarjeta_kpi(c4, "Líneas Auditadas", f"{len(linea_agg)}", C_BLUE, f"{int(linea_agg['auditorias'].sum())} auditorías totales")
 
     col_l, col_r = st.columns(2)
     with col_l:
@@ -1338,10 +1338,10 @@ with tabs[7]:
     mejor_mes = mes_agg.loc[mes_agg["cobrar_costo"].idxmax(),"mes_label"]
     peor_mes  = mes_agg.loc[mes_agg["cobrar_costo"].idxmin(),"mes_label"]
     c1,c2,c3,c4 = st.columns(4)
-    tarjeta_kpi(c1, "Meses Analizados", f"{len(mes_agg)}", C_BLUE, f"{mes_agg["auditorias"].sum():.0f} auditorías")
+    tarjeta_kpi(c1, "Meses Analizados", f"{len(mes_agg)}", C_BLUE, f"{mes_agg['auditorias'].sum():.0f} auditorías")
     c2.markdown(f'<div class="kpi-card" style="border-top-color:{C_GREEN}"><div class="kpi-label">Mejor Mes</div><div class="kpi-value pos" style="font-size:18px">{mejor_mes}</div><div class="kpi-sub">{fmt_money(mes_agg.loc[mes_agg["cobrar_costo"].idxmax(),"cobrar_costo"])}</div></div>', unsafe_allow_html=True)
     c3.markdown(f'<div class="kpi-card" style="border-top-color:{C_RED}"><div class="kpi-label">Peor Mes</div><div class="kpi-value neg" style="font-size:18px">{peor_mes}</div><div class="kpi-sub">{fmt_money(mes_agg.loc[mes_agg["cobrar_costo"].idxmin(),"cobrar_costo"])}</div></div>', unsafe_allow_html=True)
-    tarjeta_kpi(c4, "Promedio Mensual", f"{fmt_money(mes_agg["cobrar_costo"].mean())}", C_AMBER, "A cobrar costo promedio", clase_valor="neg")
+    tarjeta_kpi(c4, "Promedio Mensual", f"{fmt_money(mes_agg['cobrar_costo'].mean())}", C_AMBER, "A cobrar costo promedio", clase_valor="neg")
 
     titulo_seccion("Faltante vs Sobrante (Costo) por Mes")
     fig1 = go.Figure()
@@ -1841,7 +1841,7 @@ with tabs[9]:
 
     c1, c2, c3, c4 = st.columns(4)
     tarjeta_kpi(c1, "Auditores Retail Evaluados", f"{n_evaluados}", C_BLUE, "meta 12 auditorías/mes")
-    tarjeta_kpi(c2, "Cumplimiento Promedio", f"{cump_prom:.0f}%", C_TEAL, f"{"proyectado al cierre" if en_curso else "del ciclo cerrado"}")
+    tarjeta_kpi(c2, "Cumplimiento Promedio", f"{cump_prom:.0f}%", C_TEAL, f"{'proyectado al cierre' if en_curso else 'del ciclo cerrado'}")
     tarjeta_kpi(c3, "En Meta (≥90%)", f"{n_en_meta}", C_GREEN, f"de {n_evaluados} evaluados", clase_valor="pos")
     tarjeta_kpi(c4, "Bajo Cumplimiento (&lt;50%)", f"{n_bajo_meta}", C_RED, "requieren seguimiento", clase_valor="neg")
 
