@@ -139,6 +139,23 @@ def normalizar_auditor(nombre):
 AUDITORES_EXCLUIR = {"sin-referencia", "005-001", "BIKE SHOP DAULE V1"}
 
 # ─────────────────────────────────────────────
+# NORMALIZACIÓN DE NOMBRES DE TIENDA
+# El histórico usa ALMACÉN (ej. "BIKE SHOP CUMBAYA") y el config usa
+# Nombre tienda (ej. "BIKESHOP CUMBAYA"). FIX: comparar por clave normalizada
+# (sin espacios/tildes/mayúsculas) en vez de igualdad exacta de texto.
+# ─────────────────────────────────────────────
+import re as _re
+import unicodedata as _ud
+
+def normalizar_clave_tienda(nombre):
+    if nombre is None:
+        return ""
+    s = str(nombre).upper().strip()
+    s = "".join(c for c in _ud.normalize("NFKD", s) if not _ud.combining(c))
+    s = _re.sub(r"[^A-Z0-9]", "", s)
+    return s
+
+# ─────────────────────────────────────────────
 # EXPORTAR DATAFRAME A EXCEL (download button)
 # ─────────────────────────────────────────────
 def df_to_excel_bytes(df: pd.DataFrame) -> bytes:
@@ -166,7 +183,10 @@ def load_data(file_bytes: bytes, config_bytes: bytes = None):
     num_cols = ["TOTAL INVENTARIO COSTO","FALTANTES PVP","SOBRANTES PVP",
                 "RESULT. NETO PVP","RESULT. A COBRAR PVP","RESULT. A COBRAR COSTO",
                 "TOTAL COSTO NETO","MAL ESTADO CADUCADOS PVP",
-                "DIF. CRUCES PVP","SCORE (0/100)","DEFECTOS FÁBRICA PVP","OTROS PVP"]
+                "DIF. CRUCES PVP","SCORE (0/100)","DEFECTOS FÁBRICA PVP","OTROS PVP",
+                "AJUSTE EGRESO COSTO","AJUSTE EGRESO MAL ESTADO",
+                "AJUSTE EGRESO DEFECTO FAB.","AJUSTE INGRESO COSTO",
+                "VALOR COBRADO","PEND. FACTURAR COSTO"]
     for c in num_cols:
         if c in df.columns:
             df[c] = pd.to_numeric(df[c], errors="coerce").fillna(0)
@@ -176,6 +196,17 @@ def load_data(file_bytes: bytes, config_bytes: bytes = None):
     df["MES"]             = df["FECHA AUDITORÍA"].dt.to_period("M").astype(str)
     df["MES_LABEL"]       = df["FECHA AUDITORÍA"].dt.strftime("%b %Y")
     df["DÍAS RESPUESTA"]  = (df["FECHA ENVÍO"] - df["FECHA AUDITORÍA"]).dt.days.fillna(0)
+
+    # ── Alias de análisis AL COSTO (reemplaza el análisis a PVP) ──────────
+    # FALTANTE COSTO  = AJUSTE EGRESO COSTO (faltantes + cruces, a costo)
+    # SOBRANTE COSTO  = AJUSTE INGRESO COSTO (sobrantes, a costo)
+    # MAL ESTADO COSTO= AJUSTE EGRESO MAL ESTADO (mal estado + caducados, a costo)
+    # DEFECTOS COSTO  = AJUSTE EGRESO DEFECTO FAB. (a costo)
+    # A COBRAR COSTO  = RESULT. A COBRAR COSTO (métrica principal del dashboard)
+    df["FALTANTE COSTO"]   = df.get("AJUSTE EGRESO COSTO", 0)
+    df["SOBRANTE COSTO"]   = df.get("AJUSTE INGRESO COSTO", 0)
+    df["MAL ESTADO COSTO"] = df.get("AJUSTE EGRESO MAL ESTADO", 0)
+    df["DEFECTOS COSTO"]   = df.get("AJUSTE EGRESO DEFECTO FAB.", 0)
 
     # Normalizar auditores — FIX: unifica variantes del mismo nombre
     df["AUDITOR"] = df["AUDITOR"].apply(normalizar_auditor)
@@ -192,12 +223,12 @@ def load_data(file_bytes: bytes, config_bytes: bytes = None):
     TODAY = pd.Timestamp("today").normalize()
     last_audit = df.sort_values("FECHA AUDITORÍA").groupby("ALMACÉN").last().reset_index()
     last_audit["DÍAS SIN AUDITAR"] = (TODAY - last_audit["FECHA AUDITORÍA"]).dt.days
-    last_audit["SCORE (0/100)"]    = pd.to_numeric(last_audit["SCORE (0/100)"], errors="coerce").fillna(0)
-    last_audit["RESULT. NETO PVP"] = pd.to_numeric(last_audit["RESULT. NETO PVP"], errors="coerce").fillna(0)
+    last_audit["SCORE (0/100)"]       = pd.to_numeric(last_audit["SCORE (0/100)"], errors="coerce").fillna(0)
+    last_audit["RESULT. A COBRAR COSTO"] = pd.to_numeric(last_audit["RESULT. A COBRAR COSTO"], errors="coerce").fillna(0)
     last_audit["PRIORIDAD_SCORE"]  = (
         last_audit["DÍAS SIN AUDITAR"] * 0.4 +
         last_audit["SCORE (0/100)"]    * 1.5 +
-        last_audit["RESULT. NETO PVP"].abs() * 0.015
+        last_audit["RESULT. A COBRAR COSTO"].abs() * 0.015
     )
 
     df_sku = pd.read_excel(xl, sheet_name="Detalle_SKUs", header=2)
@@ -208,52 +239,119 @@ def load_data(file_bytes: bytes, config_bytes: bytes = None):
             df_sku[c] = pd.to_numeric(df_sku[c], errors="coerce").fillna(0)
 
     # Cargar config de tiendas si está disponible
-    # Estructura real: hoja 'Tiendas', cols: 'Nombre tienda', 'Estado',
-    #   'Auditor responsable', 'Zona', 'Línea', 'EMPRESA', 'Centro'
-    tiendas_activas  = None
-    df_config_tiendas = None
+    # Estructura real: hoja 'Tiendas', cols: 'Centro','Nombre tienda','Línea',
+    #   'EMPRESA','Auditor responsable','Zona','Estado','Fecha'
+    #   'Fecha' = fecha de cierre (si Estado=Cerrada) o fecha de apertura
+    #   (si Estado=Activa y la tienda abrió este año). Hoja 'Correos auditores'
+    #   trae 'Auditor responsable','Zona','Tipo auditor','Correo'.
+    tiendas_activas    = None
+    df_config_tiendas  = None
+    df_auditor_tipo    = None
+    tiendas_info       = {
+        "activas_por_linea": pd.DataFrame(columns=["Línea", "Tiendas Activas"]),
+        "cerradas_anio":     pd.DataFrame(),
+        "abiertas_anio":     pd.DataFrame(),
+        "anio_actual":       datetime.today().year,
+    }
+    ANIO_ACTUAL = datetime.today().year
+
     if config_bytes:
         try:
             import io as _io
-            df_config_tiendas = pd.read_excel(
-                _io.BytesIO(config_bytes), sheet_name='Tiendas'
-            )
+            df_config_tiendas = pd.read_excel(_io.BytesIO(config_bytes), sheet_name='Tiendas')
             df_config_tiendas.columns = [str(c).strip() for c in df_config_tiendas.columns]
-            # Normalizar nombre de columna Estado
+            # Normalizar nombres de columnas clave (tolerante a variantes)
             for _col in df_config_tiendas.columns:
-                if _col.lower() == 'estado':
+                cl = _col.lower()
+                if cl == 'estado':
                     df_config_tiendas.rename(columns={_col: 'Estado'}, inplace=True)
-                if _col.lower() in ('nombre tienda', 'nombre_tienda', 'almacen', 'almacén'):
+                elif cl in ('nombre tienda', 'nombre_tienda', 'almacen', 'almacén'):
                     df_config_tiendas.rename(columns={_col: 'Nombre tienda'}, inplace=True)
+                elif cl in ('linea', 'línea'):
+                    df_config_tiendas.rename(columns={_col: 'Línea'}, inplace=True)
+                elif cl == 'fecha':
+                    df_config_tiendas.rename(columns={_col: 'Fecha'}, inplace=True)
+
             if 'Estado' in df_config_tiendas.columns and 'Nombre tienda' in df_config_tiendas.columns:
+                df_config_tiendas['Estado']        = df_config_tiendas['Estado'].astype(str).str.strip().str.upper()
+                df_config_tiendas['_CLAVE_TIENDA']  = df_config_tiendas['Nombre tienda'].apply(normalizar_clave_tienda)
+                if 'Fecha' in df_config_tiendas.columns:
+                    df_config_tiendas['Fecha'] = pd.to_datetime(df_config_tiendas['Fecha'], errors='coerce')
+
                 tiendas_activas = set(
-                    df_config_tiendas[
-                        df_config_tiendas['Estado'].str.strip().str.lower() == 'activa'
-                    ]['Nombre tienda'].str.strip().unique()
+                    df_config_tiendas.loc[df_config_tiendas['Estado'] == 'ACTIVA', '_CLAVE_TIENDA']
                 )
+
+                # ── Tiendas activas por línea (según el config = fuente de verdad) ──
+                if 'Línea' in df_config_tiendas.columns:
+                    tiendas_info["activas_por_linea"] = (
+                        df_config_tiendas[df_config_tiendas['Estado'] == 'ACTIVA']
+                        .groupby('Línea').size()
+                        .reset_index(name='Tiendas Activas')
+                        .sort_values('Tiendas Activas', ascending=False)
+                    )
+
+                # ── Tiendas cerradas / abiertas en el año actual ──
+                if 'Fecha' in df_config_tiendas.columns:
+                    tiendas_info["cerradas_anio"] = df_config_tiendas[
+                        (df_config_tiendas['Estado'] == 'CERRADA') &
+                        (df_config_tiendas['Fecha'].dt.year == ANIO_ACTUAL)
+                    ].copy()
+                    tiendas_info["abiertas_anio"] = df_config_tiendas[
+                        (df_config_tiendas['Estado'] == 'ACTIVA') &
+                        (df_config_tiendas['Fecha'].notna()) &
+                        (df_config_tiendas['Fecha'].dt.year == ANIO_ACTUAL)
+                    ].copy()
+                tiendas_info["anio_actual"] = ANIO_ACTUAL
         except Exception:
-            tiendas_activas = None
+            tiendas_activas   = None
             df_config_tiendas = None
 
-    # Filtrar tiendas cerradas del histórico principal
-    if tiendas_activas:
-        df_activas = df[df['ALMACÉN'].str.strip().isin(tiendas_activas)].copy()
-        if len(df_activas) > 0:
-            df = df_activas
+        # ── Tipo de auditor (Retail / Coral / ...) desde 'Correos auditores' ──
+        try:
+            df_auditor_tipo = pd.read_excel(_io.BytesIO(config_bytes), sheet_name='Correos auditores')
+            df_auditor_tipo.columns = [str(c).strip() for c in df_auditor_tipo.columns]
+            for _col in df_auditor_tipo.columns:
+                if _col.lower() in ('auditor responsable', 'auditor'):
+                    df_auditor_tipo.rename(columns={_col: 'Auditor responsable'}, inplace=True)
+                if _col.lower() in ('tipo auditor', 'tipo'):
+                    df_auditor_tipo.rename(columns={_col: 'Tipo auditor'}, inplace=True)
+            df_auditor_tipo['_AUD_NORM'] = df_auditor_tipo['Auditor responsable'].apply(normalizar_auditor)
+        except Exception:
+            df_auditor_tipo = None
 
-    # Recalcular last_audit con tiendas activas
+    # Filtrar tiendas cerradas del histórico principal — FIX: match por clave
+    # normalizada (sin espacios/tildes/mayúsculas) en vez de igualdad exacta,
+    # ya que "BIKE SHOP CUMBAYA" (histórico) vs "BIKESHOP CUMBAYA" (config)
+    # no calzaban con .isin() directo y esas tiendas quedaban excluidas sin aviso.
+    if tiendas_activas:
+        df['_CLAVE_TIENDA'] = df['ALMACÉN'].apply(normalizar_clave_tienda)
+        df_activas = df[df['_CLAVE_TIENDA'].isin(tiendas_activas)].copy()
+        if len(df_activas) > 0:
+            df = df_activas.drop(columns=['_CLAVE_TIENDA'])
+        else:
+            df = df.drop(columns=['_CLAVE_TIENDA'])
+
+    # Tipo de auditor (Retail / Coral / ...) sobre el histórico ya filtrado
+    if df_auditor_tipo is not None:
+        mapa_tipo = dict(zip(df_auditor_tipo['_AUD_NORM'], df_auditor_tipo['Tipo auditor']))
+        df['TIPO_AUDITOR'] = df['AUDITOR'].map(mapa_tipo).fillna('Sin clasificar')
+    else:
+        df['TIPO_AUDITOR'] = 'Sin clasificar'
+
+    # Recalcular last_audit con tiendas activas y métrica al costo
     TODAY = pd.Timestamp('today').normalize()
     last_audit = df.sort_values('FECHA AUDITORÍA').groupby('ALMACÉN').last().reset_index()
     last_audit['DÍAS SIN AUDITAR'] = (TODAY - last_audit['FECHA AUDITORÍA']).dt.days
-    last_audit['SCORE (0/100)']    = pd.to_numeric(last_audit['SCORE (0/100)'], errors='coerce').fillna(0)
-    last_audit['RESULT. NETO PVP'] = pd.to_numeric(last_audit['RESULT. NETO PVP'], errors='coerce').fillna(0)
+    last_audit['SCORE (0/100)']          = pd.to_numeric(last_audit['SCORE (0/100)'], errors='coerce').fillna(0)
+    last_audit['RESULT. A COBRAR COSTO'] = pd.to_numeric(last_audit['RESULT. A COBRAR COSTO'], errors='coerce').fillna(0)
     last_audit['PRIORIDAD_SCORE']  = (
         last_audit['DÍAS SIN AUDITAR'] * 0.4 +
         last_audit['SCORE (0/100)']    * 1.5 +
-        last_audit['RESULT. NETO PVP'].abs() * 0.015
+        last_audit['RESULT. A COBRAR COSTO'].abs() * 0.015
     )
 
-    return df, last_audit, df_sku, tiendas_activas, df_config_tiendas
+    return df, last_audit, df_sku, tiendas_activas, df_config_tiendas, tiendas_info
 
 
 # ─────────────────────────────────────────────
@@ -307,7 +405,7 @@ with st.sidebar:
     # Carga con manejo de errores
     try:
         with st.spinner("Cargando datos..."):
-            df, last_audit, df_sku, tiendas_activas, df_config_tiendas = load_data(file_bytes, config_bytes)
+            df, last_audit, df_sku, tiendas_activas, df_config_tiendas, tiendas_info = load_data(file_bytes, config_bytes)
     except Exception as e:
         st.error(f"❌ Error al leer el archivo: {e}")
         st.info("Verifica que el archivo tenga las hojas: Registro_Auditorias, Detalle_SKUs")
@@ -315,8 +413,8 @@ with st.sidebar:
 
     # Mostrar estado del filtro de tiendas
     if tiendas_activas is not None and df_config_tiendas is not None:
-        n_activas  = (df_config_tiendas['Estado'].str.strip().str.lower() == 'activa').sum()
-        n_cerradas = (df_config_tiendas['Estado'].str.strip().str.lower() == 'cerrada').sum()
+        n_activas  = (df_config_tiendas['Estado'] == 'ACTIVA').sum()
+        n_cerradas = (df_config_tiendas['Estado'] == 'CERRADA').sum()
         if n_cerradas > 0:
             st.sidebar.success(f"✓ {n_activas} activas · {n_cerradas} cerradas excluidas")
         else:
@@ -533,28 +631,71 @@ with tabs[0]:
 
     inv       = dff["TOTAL INVENTARIO COSTO"].sum()
     cobrar_c  = pd.to_numeric(dff.get("RESULT. A COBRAR COSTO", 0), errors="coerce").fillna(0).sum() if "RESULT. A COBRAR COSTO" in dff.columns else 0
-    neto_c    = pd.to_numeric(dff.get("TOTAL COSTO NETO",       0), errors="coerce").fillna(0).sum() if "TOTAL COSTO NETO"       in dff.columns else 0
-    falt_c    = dff["FALTANTES PVP"].sum()
-    sobr_c    = dff["SOBRANTES PVP"].sum()
+    cobrado_c = pd.to_numeric(dff.get("VALOR COBRADO", 0), errors="coerce").fillna(0).sum() if "VALOR COBRADO" in dff.columns else 0
+    falt_c    = dff["FALTANTE COSTO"].sum()
+    sobr_c    = dff["SOBRANTE COSTO"].sum()
     n_aud     = len(dff)
     n_crit    = (dff["RIESGO_NORM"] == "CRÍTICO").sum()
     n_alto    = (dff["RIESGO_NORM"] == "ALTO").sum()
     n_medio   = (dff["RIESGO_NORM"] == "MEDIO").sum()
     n_bajo    = (dff["RIESGO_NORM"] == "BAJO").sum()
     score_avg = dff["SCORE (0/100)"].mean()
-    mal_est   = dff["MAL ESTADO CADUCADOS PVP"].sum()
+    mal_est   = dff["MAL ESTADO COSTO"].sum()
+    pct_cobrado = (cobrado_c / abs(cobrar_c) * 100) if cobrar_c != 0 else 0
 
     c1,c2,c3,c4 = st.columns(4)
     c1.markdown(f'<div class="kpi-card" style="border-top-color:{C_BLUE}"><div class="kpi-label">Inventario Auditado (Costo)</div><div class="kpi-value neu">${inv/1e6:.2f}M</div><div class="kpi-sub">{n_aud} auditorías en período</div></div>', unsafe_allow_html=True)
-    c2.markdown(f'<div class="kpi-card" style="border-top-color:{C_RED}"><div class="kpi-label">A Cobrar (Costo)</div><div class="kpi-value neg">{fmt_money(cobrar_c)}</div><div class="kpi-sub">Recuperación pendiente</div></div>', unsafe_allow_html=True)
-    c3.markdown(f'<div class="kpi-card" style="border-top-color:{C_AMBER}"><div class="kpi-label">Costo Neto Total</div><div class="kpi-value neg">{fmt_money(neto_c)}</div><div class="kpi-sub">Pérdida neta del período</div></div>', unsafe_allow_html=True)
-    c4.markdown(f'<div class="kpi-card" style="border-top-color:{C_GREEN}"><div class="kpi-label">Mal Estado / Caducados</div><div class="kpi-value neg">{fmt_money(mal_est)}</div><div class="kpi-sub">Faltantes: {fmt_money(falt_c)} · Sob: {fmt_money(sobr_c)}</div></div>', unsafe_allow_html=True)
+    c2.markdown(f'<div class="kpi-card" style="border-top-color:{C_RED}"><div class="kpi-label">Faltante a Cobrar (Costo)</div><div class="kpi-value neg">{fmt_money(cobrar_c)}</div><div class="kpi-sub">Recuperación pendiente</div></div>', unsafe_allow_html=True)
+    c3.markdown(f'<div class="kpi-card" style="border-top-color:{C_GREEN}"><div class="kpi-label">Valores Cobrados</div><div class="kpi-value {"pos" if cobrado_c > 0 else "neu"}">{fmt_money(cobrado_c)}</div><div class="kpi-sub">{pct_cobrado:.1f}% del faltante recuperado</div></div>', unsafe_allow_html=True)
+    c4.markdown(f'<div class="kpi-card" style="border-top-color:{C_AMBER}"><div class="kpi-label">Mal Estado / Caducados (Costo)</div><div class="kpi-value neg">{fmt_money(mal_est)}</div><div class="kpi-sub">Faltante: {fmt_money(falt_c)} · Sobrante: {fmt_money(sobr_c)}</div></div>', unsafe_allow_html=True)
 
     c5,c6,c7,c8 = st.columns(4)
     c5.markdown(f'<div class="kpi-card" style="border-top-color:{C_TEAL}"><div class="kpi-label">Auditorías</div><div class="kpi-value neu">{n_aud}</div><div class="kpi-sub">Período seleccionado</div></div>', unsafe_allow_html=True)
     c6.markdown(f'<div class="kpi-card" style="border-top-color:{C_RED}"><div class="kpi-label">Riesgo Crítico / Alto</div><div class="kpi-value neg">{n_crit + n_alto}</div><div class="kpi-sub">{n_crit} críticos · {n_alto} altos · {n_medio} medios</div></div>', unsafe_allow_html=True)
     c7.markdown(f'<div class="kpi-card" style="border-top-color:{C_PURPLE}"><div class="kpi-label">Score Riesgo Prom.</div><div class="kpi-value neu">{score_avg:.1f} / 100</div><div class="kpi-sub">Mayor = mayor riesgo</div></div>', unsafe_allow_html=True)
     c8.markdown(f'<div class="kpi-card" style="border-top-color:{C_NAVY}"><div class="kpi-label">Tiendas Auditadas</div><div class="kpi-value neu">{dff["ALMACÉN"].nunique()}</div><div class="kpi-sub">{dff["LÍNEA"].nunique()} líneas · {dff["ZONA"].nunique()} zonas</div></div>', unsafe_allow_html=True)
+
+    # ─────────────────────────────────────────────
+    # ESTADO DE LA RED DE TIENDAS — activas por línea + aperturas/cierres del año
+    # ─────────────────────────────────────────────
+    st.markdown('<div class="section-title">Estado de la Red de Tiendas</div>', unsafe_allow_html=True)
+    anio_actual   = tiendas_info.get("anio_actual", datetime.today().year)
+    df_activas_ln = tiendas_info.get("activas_por_linea", pd.DataFrame())
+    df_cerr_anio  = tiendas_info.get("cerradas_anio", pd.DataFrame())
+    df_abr_anio   = tiendas_info.get("abiertas_anio", pd.DataFrame())
+
+    if df_config_tiendas is None:
+        st.info("Sube **Detalle_Tiendas_Auditores.xlsx** en el panel lateral para ver tiendas activas, cerradas y abiertas.")
+    else:
+        col_est1, col_est2, col_est3 = st.columns([1.3, 1, 1])
+        with col_est1:
+            st.markdown('<div style="font-size:12px;font-weight:600;color:#042C53;margin-bottom:6px">Tiendas Activas por Línea</div>', unsafe_allow_html=True)
+            if len(df_activas_ln) > 0:
+                fig_tl = px.bar(df_activas_ln, x="Tiendas Activas", y="Línea", orientation="h",
+                                 color_discrete_sequence=[C_BLUE], text="Tiendas Activas")
+                fig_tl.update_layout(height=230, plot_bgcolor="white", paper_bgcolor="white",
+                                      margin=dict(l=0,r=0,t=0,b=0),
+                                      xaxis=dict(showgrid=True, gridcolor="#f0f0f0"),
+                                      yaxis=dict(autorange="reversed"))
+                fig_tl.update_traces(textposition="outside")
+                st.plotly_chart(fig_tl, use_container_width=True)
+            else:
+                st.caption("Sin columna 'Línea' en el config de tiendas.")
+        with col_est2:
+            n_cerr = len(df_cerr_anio)
+            st.markdown(f'<div class="kpi-card" style="border-top-color:{C_RED}"><div class="kpi-label">Cerradas en {anio_actual}</div><div class="kpi-value neg">{n_cerr}</div><div class="kpi-sub">tienda(s) dada(s) de baja</div></div>', unsafe_allow_html=True)
+            if n_cerr > 0:
+                for _, r in df_cerr_anio.sort_values("Fecha").iterrows():
+                    fcierre = r["Fecha"].strftime("%d/%m/%Y") if pd.notna(r.get("Fecha")) else "—"
+                    st.markdown(f'<div style="font-size:11px;color:#791F1F;padding:2px 0">🔴 {r.get("Nombre tienda","")} <span style="color:#999">({fcierre})</span></div>', unsafe_allow_html=True)
+        with col_est3:
+            n_abr = len(df_abr_anio)
+            st.markdown(f'<div class="kpi-card" style="border-top-color:{C_GREEN}"><div class="kpi-label">Abiertas en {anio_actual}</div><div class="kpi-value pos">{n_abr}</div><div class="kpi-sub">tienda(s) nueva(s)</div></div>', unsafe_allow_html=True)
+            if n_abr > 0:
+                for _, r in df_abr_anio.sort_values("Fecha").iterrows():
+                    fapert = r["Fecha"].strftime("%d/%m/%Y") if pd.notna(r.get("Fecha")) else "—"
+                    st.markdown(f'<div style="font-size:11px;color:#27500A;padding:2px 0">🟢 {r.get("Nombre tienda","")} <span style="color:#999">({fapert})</span></div>', unsafe_allow_html=True)
+        st.caption("Usa esta sección para decidir qué tiendas priorizar o descartar al planificar el calendario de auditorías del período.")
 
     st.markdown('<div class="section-title">Tendencia Mensual</div>', unsafe_allow_html=True)
     col_l, col_r = st.columns([2, 1])
@@ -563,16 +704,15 @@ with tabs[0]:
         mes_agg = dff.groupby("MES").agg(
             auditorias=("No.","count"),
             cobrar_costo=("RESULT. A COBRAR COSTO","sum"),
-            neto_costo=("TOTAL COSTO NETO","sum"),
-            faltantes=("FALTANTES PVP","sum"),
-            sobrantes=("SOBRANTES PVP","sum"),
+            faltantes=("FALTANTE COSTO","sum"),
+            sobrantes=("SOBRANTE COSTO","sum"),
             mes_label=("MES_LABEL","first")
         ).reset_index().sort_values("MES")
         fig = go.Figure()
         fig.add_bar(x=mes_agg["mes_label"], y=mes_agg["faltantes"].abs(),
-                    name="Faltantes", marker_color=C_RED, opacity=0.85)
+                    name="Faltante (Costo)", marker_color=C_RED, opacity=0.85)
         fig.add_bar(x=mes_agg["mes_label"], y=mes_agg["sobrantes"],
-                    name="Sobrantes", marker_color=C_GREEN, opacity=0.85)
+                    name="Sobrante (Costo)", marker_color=C_GREEN, opacity=0.85)
         fig.add_scatter(x=mes_agg["mes_label"], y=mes_agg["cobrar_costo"].abs(),
                         name="A Cobrar (Costo)", mode="lines+markers",
                         line=dict(color=C_NAVY, width=2.5), marker=dict(size=8, color=C_NAVY))
@@ -599,14 +739,16 @@ with tabs[0]:
     st.markdown('<div class="section-title">Exportar Resumen</div>', unsafe_allow_html=True)
     resumen_export = pd.DataFrame([{
         "Métrica": "Inventario Auditado (Costo)", "Valor": fmt_money(inv)
-    },{"Métrica": "A Cobrar (Costo)", "Valor": fmt_money(cobrar_c)
-    },{"Métrica": "Costo Neto Total", "Valor": fmt_money(neto_c)
-    },{"Métrica": "Faltantes", "Valor": fmt_money(falt_c)
-    },{"Métrica": "Sobrantes", "Valor": fmt_money(sobr_c)
-    },{"Métrica": "Mal Estado / Caducados", "Valor": fmt_money(mal_est)
+    },{"Métrica": "Faltante a Cobrar (Costo)", "Valor": fmt_money(cobrar_c)
+    },{"Métrica": "Valores Cobrados", "Valor": fmt_money(cobrado_c)
+    },{"Métrica": "Faltante (Costo)", "Valor": fmt_money(falt_c)
+    },{"Métrica": "Sobrante (Costo)", "Valor": fmt_money(sobr_c)
+    },{"Métrica": "Mal Estado / Caducados (Costo)", "Valor": fmt_money(mal_est)
     },{"Métrica": "Auditorías", "Valor": n_aud
     },{"Métrica": "Riesgo Crítico+Alto", "Valor": n_crit + n_alto
     },{"Métrica": "Score Promedio", "Valor": f"{score_avg:.1f}"
+    },{"Métrica": f"Tiendas Cerradas en {anio_actual}", "Valor": len(df_cerr_anio)
+    },{"Métrica": f"Tiendas Abiertas en {anio_actual}", "Valor": len(df_abr_anio)
     }])
     download_button_excel(resumen_export, f"resumen_ejecutivo_{datetime.today().strftime('%Y%m%d')}.xlsx",
                           "⬇ Exportar resumen ejecutivo")
@@ -618,11 +760,19 @@ with tabs[0]:
 with tabs[1]:
     st.markdown('<div class="section-title">Rendimiento por Auditor</div>', unsafe_allow_html=True)
 
-    aud_agg = dff.groupby("AUDITOR").agg(
-        auditorias=("No.","count"), faltantes=("FALTANTES PVP","sum"),
-        sobrantes=("SOBRANTES PVP","sum"), result_neto=("RESULT. NETO PVP","sum"),
-        cobrar=("RESULT. A COBRAR COSTO","sum"), score_prom=("SCORE (0/100)","mean"),
-        dias_resp=("DÍAS RESPUESTA","mean")
+    tipos_disp = ["Todos"] + sorted(dff["TIPO_AUDITOR"].dropna().unique().tolist())
+    sel_tipo_aud = st.selectbox("Tipo de auditor", tipos_disp, key="tipo_auditor_filtro",
+                                 help="Agrupa auditores por tipo (Retail, Coral, ...) según Detalle_Tiendas_Auditores.xlsx")
+    dff_aud = dff if sel_tipo_aud == "Todos" else dff[dff["TIPO_AUDITOR"] == sel_tipo_aud]
+
+    if len(dff_aud) == 0:
+        st.info("No hay auditorías para el tipo de auditor seleccionado.")
+        st.stop()
+
+    aud_agg = dff_aud.groupby(["AUDITOR","TIPO_AUDITOR"]).agg(
+        auditorias=("No.","count"),
+        cobrar=("RESULT. A COBRAR COSTO","sum"),
+        score_prom=("SCORE (0/100)","mean"),
     ).reset_index().sort_values("auditorias", ascending=False)
 
     bg_colors = ["#E6F1FB","#EAF3DE","#FAEEDA","#EEEDFE"]
@@ -639,12 +789,12 @@ with tabs[1]:
                           display:flex;align-items:center;justify-content:center;
                           font-weight:700;font-size:14px;margin:0 auto 10px auto">{ini}</div>
               <div style="font-size:13px;font-weight:600;color:#1a1a2e">{row['AUDITOR']}</div>
-              <div style="font-size:11px;color:#aaa;margin-bottom:10px">{int(row['auditorias'])} auditorías</div>
+              <div style="font-size:11px;color:#aaa;margin-bottom:10px">{row['TIPO_AUDITOR']} · {int(row['auditorias'])} auditorías</div>
               <div style="display:flex;justify-content:space-around">
-                <div><div style="font-size:16px;font-weight:700;color:#A32D2D">{fmt_money(row['result_neto'])}</div>
-                     <div style="font-size:10px;color:#aaa">Neto PVP</div></div>
-                <div><div style="font-size:16px;font-weight:700;color:#185FA5">{row['dias_resp']:.1f}d</div>
-                     <div style="font-size:10px;color:#aaa">T. respuesta</div></div>
+                <div><div style="font-size:16px;font-weight:700;color:#A32D2D">{fmt_money(row['cobrar'])}</div>
+                     <div style="font-size:10px;color:#aaa">A Cobrar Costo</div></div>
+                <div><div style="font-size:16px;font-weight:700;color:#185FA5">{row['score_prom']:.1f}</div>
+                     <div style="font-size:10px;color:#aaa">Score Prom.</div></div>
               </div>
             </div>""", unsafe_allow_html=True)
 
@@ -659,33 +809,24 @@ with tabs[1]:
         fig.update_traces(textposition="outside")
         st.plotly_chart(fig, use_container_width=True)
     with col_b:
-        st.markdown('<div class="section-title">Días Prom. Auditoría → Envío</div>', unsafe_allow_html=True)
-        fig2 = px.bar(aud_agg.sort_values("dias_resp"), x="dias_resp", y="AUDITOR",
-                      orientation="h", color="dias_resp",
-                      color_continuous_scale=["#639922","#EF9F27","#E24B4A"],
-                      labels={"dias_resp":"Días promedio","AUDITOR":""},
-                      text=aud_agg.sort_values("dias_resp")["dias_resp"].round(1))
+        st.markdown('<div class="section-title">Auditorías por Tipo de Auditor</div>', unsafe_allow_html=True)
+        tipo_agg_aud = dff_aud.groupby("TIPO_AUDITOR").agg(n=("No.","count")).reset_index().sort_values("n")
+        fig2 = px.bar(tipo_agg_aud, x="n", y="TIPO_AUDITOR", orientation="h",
+                      color_discrete_sequence=[C_TEAL], labels={"n":"Auditorías","TIPO_AUDITOR":""}, text="n")
         fig2.update_layout(height=260, plot_bgcolor="white", paper_bgcolor="white",
-                           margin=dict(l=0,r=0,t=10,b=0), coloraxis_showscale=False,
+                           margin=dict(l=0,r=0,t=10,b=0),
                            xaxis=dict(showgrid=True, gridcolor="#f0f0f0"))
         fig2.update_traces(textposition="outside")
         st.plotly_chart(fig2, use_container_width=True)
 
     st.markdown('<div class="section-title">Tabla Resumen por Auditor</div>', unsafe_allow_html=True)
     tabla_aud = aud_agg.copy()
-    tabla_aud.columns = ["Auditor","Auditorías","Faltantes","Sobrantes",
-                          "Costo Neto","A Cobrar Costo","Score Prom.","Días Respuesta"]
-    for col in ["Faltantes","Sobrantes","Costo Neto","A Cobrar Costo"]:
-        tabla_aud[col] = tabla_aud[col].apply(fmt_money)
-    tabla_aud["Score Prom."]     = tabla_aud["Score Prom."].round(1)
-    tabla_aud["Días Respuesta"]  = tabla_aud["Días Respuesta"].round(1)
-    tot_aud = pd.DataFrame([{"Auditor":"TOTAL","Auditorías":tabla_aud["Auditorías"].sum(),
-        "Faltantes PVP":fmt_money(aud_agg["faltantes"].sum()),
-        "Sobrantes PVP":fmt_money(aud_agg["sobrantes"].sum()),
-        "Costo Neto":fmt_money(aud_agg["result_neto"].sum()),
+    tabla_aud.columns = ["Auditor","Tipo","Auditorías","A Cobrar Costo","Score Prom."]
+    tabla_aud["A Cobrar Costo"] = tabla_aud["A Cobrar Costo"].apply(fmt_money)
+    tabla_aud["Score Prom."]    = tabla_aud["Score Prom."].round(1)
+    tot_aud = pd.DataFrame([{"Auditor":"TOTAL","Tipo":"—","Auditorías":int(aud_agg["auditorias"].sum()),
         "A Cobrar Costo":fmt_money(aud_agg["cobrar"].sum()),
-        "Score Prom.":round(aud_agg["score_prom"].mean(),1),
-        "Días Respuesta":round(aud_agg["dias_resp"].mean(),1)}])
+        "Score Prom.":round(aud_agg["score_prom"].mean(),1)}])
     tabla_aud_full = pd.concat([tabla_aud, tot_aud], ignore_index=True)
     st.dataframe(tabla_aud_full, use_container_width=True, hide_index=True)
     download_button_excel(tabla_aud_full, f"auditores_{datetime.today().strftime('%Y%m%d')}.xlsx",
@@ -699,28 +840,28 @@ with tabs[2]:
 
     linea_agg = dff.groupby("LÍNEA").agg(
         auditorias=("No.","count"), inv_total=("TOTAL INVENTARIO COSTO","sum"),
-        faltantes=("FALTANTES PVP","sum"), sobrantes=("SOBRANTES PVP","sum"),
-        result_neto=("RESULT. A COBRAR COSTO","sum"), cobrar=("RESULT. A COBRAR COSTO","sum"),
+        faltantes=("FALTANTE COSTO","sum"), sobrantes=("SOBRANTE COSTO","sum"),
+        cobrar=("RESULT. A COBRAR COSTO","sum"),
         score_prom=("SCORE (0/100)","mean"),
-    ).reset_index().sort_values("result_neto")
+    ).reset_index().sort_values("cobrar")
 
     worst      = linea_agg.iloc[0]
-    best       = linea_agg[linea_agg["result_neto"]==linea_agg["result_neto"].max()].iloc[0]
+    best       = linea_agg[linea_agg["cobrar"]==linea_agg["cobrar"].max()].iloc[0]
     high_score = linea_agg.loc[linea_agg["score_prom"].idxmax()]
 
     c1,c2,c3,c4 = st.columns(4)
-    c1.markdown(f'<div class="kpi-card" style="border-top-color:{C_RED}"><div class="kpi-label">Mayor Pérdida</div><div class="kpi-value neg" style="font-size:18px">{worst["LÍNEA"]}</div><div class="kpi-sub">{fmt_money(worst["result_neto"])} resultado neto</div></div>', unsafe_allow_html=True)
-    c2.markdown(f'<div class="kpi-card" style="border-top-color:{C_GREEN}"><div class="kpi-label">Mejor Resultado</div><div class="kpi-value pos" style="font-size:18px">{best["LÍNEA"]}</div><div class="kpi-sub">{fmt_money(best["result_neto"])} resultado neto</div></div>', unsafe_allow_html=True)
+    c1.markdown(f'<div class="kpi-card" style="border-top-color:{C_RED}"><div class="kpi-label">Mayor Pérdida</div><div class="kpi-value neg" style="font-size:18px">{worst["LÍNEA"]}</div><div class="kpi-sub">{fmt_money(worst["cobrar"])} a cobrar (costo)</div></div>', unsafe_allow_html=True)
+    c2.markdown(f'<div class="kpi-card" style="border-top-color:{C_GREEN}"><div class="kpi-label">Mejor Resultado</div><div class="kpi-value pos" style="font-size:18px">{best["LÍNEA"]}</div><div class="kpi-sub">{fmt_money(best["cobrar"])} a cobrar (costo)</div></div>', unsafe_allow_html=True)
     c3.markdown(f'<div class="kpi-card" style="border-top-color:{C_AMBER}"><div class="kpi-label">Score Más Alto</div><div class="kpi-value neg" style="font-size:18px">{high_score["LÍNEA"]}</div><div class="kpi-sub">Score prom. {high_score["score_prom"]:.1f} / 100</div></div>', unsafe_allow_html=True)
     c4.markdown(f'<div class="kpi-card" style="border-top-color:{C_BLUE}"><div class="kpi-label">Líneas Auditadas</div><div class="kpi-value neu">{len(linea_agg)}</div><div class="kpi-sub">{int(linea_agg["auditorias"].sum())} auditorías totales</div></div>', unsafe_allow_html=True)
 
     col_l, col_r = st.columns(2)
     with col_l:
-        st.markdown('<div class="section-title">Resultado Neto PVP por Línea</div>', unsafe_allow_html=True)
-        colors = [C_RED if v < -1000 else C_AMBER if v < 0 else C_GREEN for v in linea_agg["result_neto"]]
-        fig = go.Figure(go.Bar(x=linea_agg["result_neto"], y=linea_agg["LÍNEA"], orientation="h",
+        st.markdown('<div class="section-title">A Cobrar por Línea (Costo)</div>', unsafe_allow_html=True)
+        colors = [C_RED if v < -1000 else C_AMBER if v < 0 else C_GREEN for v in linea_agg["cobrar"]]
+        fig = go.Figure(go.Bar(x=linea_agg["cobrar"], y=linea_agg["LÍNEA"], orientation="h",
                                marker_color=colors,
-                               text=[fmt_money(v) for v in linea_agg["result_neto"]], textposition="outside"))
+                               text=[fmt_money(v) for v in linea_agg["cobrar"]], textposition="outside"))
         fig.update_layout(height=320, plot_bgcolor="white", paper_bgcolor="white",
                           margin=dict(l=0,r=80,t=10,b=0),
                           xaxis=dict(tickprefix="$", showgrid=True, gridcolor="#f0f0f0"),
@@ -738,18 +879,35 @@ with tabs[2]:
         fig2.update_traces(textposition="outside")
         st.plotly_chart(fig2, use_container_width=True)
 
+    # ── Ranking completo de todas las líneas: peor a mejor resultado ──────
+    st.markdown('<div class="section-title">Ranking Completo — Todas las Líneas (Peor a Mejor Resultado)</div>', unsafe_allow_html=True)
+    ranking_ln = linea_agg.sort_values("cobrar").reset_index(drop=True)
+    for i, row in ranking_ln.iterrows():
+        v = row["cobrar"]
+        bg    = "#FFCCCC" if v < -5000 else "#FFE5CC" if v < 0 else "#D5F5E3"
+        color = C_RED     if v < -5000 else C_AMBER   if v < 0 else C_GREEN
+        st.markdown(f"""
+        <div style="display:flex;align-items:center;gap:10px;padding:7px 10px;
+                    background:{bg};border-radius:8px;margin-bottom:4px">
+          <div style="width:24px;height:24px;border-radius:50%;background:white;color:{color};
+                      display:flex;align-items:center;justify-content:center;
+                      font-weight:700;font-size:11px;flex-shrink:0">{i+1}</div>
+          <div style="flex:1;font-size:12px;font-weight:600;color:#1a1a2e">{row['LÍNEA']}</div>
+          <div style="font-size:11px;color:#666">{int(row['auditorias'])} auditorías · Score {row['score_prom']:.1f}</div>
+          <div style="font-size:13px;font-weight:700;color:{color};min-width:110px;text-align:right">{fmt_money(v)}</div>
+        </div>""", unsafe_allow_html=True)
+
     tabla_linea = linea_agg.copy()
-    tabla_linea.columns = ["Línea","Auditorías","Inv. Total","Faltantes",
-                            "Sobrantes","A Cobrar Costo","Costo Neto","Score Prom."]
-    for col in ["Inv. Total","Faltantes","Sobrantes","A Cobrar Costo","Costo Neto"]:
+    tabla_linea.columns = ["Línea","Auditorías","Inv. Total","Faltante Costo",
+                            "Sobrante Costo","A Cobrar Costo","Score Prom."]
+    for col in ["Inv. Total","Faltante Costo","Sobrante Costo","A Cobrar Costo"]:
         tabla_linea[col] = tabla_linea[col].apply(fmt_money)
     tabla_linea["Score Prom."] = tabla_linea["Score Prom."].round(1)
-    tot_lin = pd.DataFrame([{"Línea":"TOTAL","Auditorías":linea_agg["auditorias"].sum(),
+    tot_lin = pd.DataFrame([{"Línea":"TOTAL","Auditorías":int(linea_agg["auditorias"].sum()),
         "Inv. Total":fmt_money(linea_agg["inv_total"].sum()),
-        "Faltantes PVP":fmt_money(linea_agg["faltantes"].sum()),
-        "Sobrantes PVP":fmt_money(linea_agg["sobrantes"].sum()),
-        "A Cobrar Costo":fmt_money(linea_agg["result_neto"].sum()),
-        "Costo Neto":fmt_money(linea_agg["cobrar"].sum()),
+        "Faltante Costo":fmt_money(linea_agg["faltantes"].sum()),
+        "Sobrante Costo":fmt_money(linea_agg["sobrantes"].sum()),
+        "A Cobrar Costo":fmt_money(linea_agg["cobrar"].sum()),
         "Score Prom.":round(linea_agg["score_prom"].mean(),1)}])
     tabla_linea_full = pd.concat([tabla_linea, tot_lin], ignore_index=True)
     st.dataframe(tabla_linea_full, use_container_width=True, hide_index=True)
@@ -834,7 +992,7 @@ with tabs[4]:
     tienda_df  = dff[dff["ALMACÉN"] == sel_tienda].sort_values("FECHA AUDITORÍA")
 
     t_inv    = tienda_df["TOTAL INVENTARIO COSTO"].sum()
-    t_falt   = tienda_df["FALTANTES PVP"].sum()
+    t_falt   = tienda_df["FALTANTE COSTO"].sum()
     t_cobrar = pd.to_numeric(tienda_df.get("RESULT. A COBRAR COSTO", 0), errors="coerce").fillna(0).sum()
     t_neto   = pd.to_numeric(tienda_df.get("TOTAL COSTO NETO",       0), errors="coerce").fillna(0).sum()
     t_score  = tienda_df["SCORE (0/100)"].mean()
@@ -846,7 +1004,7 @@ with tabs[4]:
     c1,c2,c3,c4 = st.columns(4)
     c1.markdown(f'<div class="kpi-card" style="border-top-color:{C_BLUE}"><div class="kpi-label">Inventario Auditado</div><div class="kpi-value neu">{fmt_money(t_inv)}</div><div class="kpi-sub">{t_zona} · {t_linea}</div></div>', unsafe_allow_html=True)
     c2.markdown(f'<div class="kpi-card" style="border-top-color:{C_RED}"><div class="kpi-label">A Cobrar (Costo)</div><div class="kpi-value neg">{fmt_money(t_cobrar)}</div><div class="kpi-sub">{len(tienda_df)} auditoría(s)</div></div>', unsafe_allow_html=True)
-    c3.markdown(f'<div class="kpi-card" style="border-top-color:{C_AMBER}"><div class="kpi-label">Costo Neto</div><div class="kpi-value neg">{fmt_money(t_neto)}</div><div class="kpi-sub">Faltantes: {fmt_money(t_falt)}</div></div>', unsafe_allow_html=True)
+    c3.markdown(f'<div class="kpi-card" style="border-top-color:{C_AMBER}"><div class="kpi-label">Costo Neto</div><div class="kpi-value neg">{fmt_money(t_neto)}</div><div class="kpi-sub">Faltante (Costo): {fmt_money(t_falt)}</div></div>', unsafe_allow_html=True)
     c4.markdown(f'<div class="kpi-card" style="border-top-color:{rcolor}"><div class="kpi-label">Score de Riesgo</div><div class="kpi-value" style="color:{rcolor}">{t_score:.1f} / 100</div><div class="kpi-sub">Clasificación: {t_riesgo}</div></div>', unsafe_allow_html=True)
 
     col_g, col_c = st.columns([2,1])
@@ -854,16 +1012,16 @@ with tabs[4]:
         st.markdown('<div class="section-title">Evolución de Resultados por Mes</div>', unsafe_allow_html=True)
         # Agrupar por mes — si hay 2 auditorías en el mismo mes se suman
         tienda_mes = tienda_df.groupby("MES").agg(
-            faltantes=("FALTANTES PVP","sum"),
-            sobrantes=("SOBRANTES PVP","sum"),
+            faltantes=("FALTANTE COSTO","sum"),
+            sobrantes=("SOBRANTE COSTO","sum"),
             cobrar_costo=("RESULT. A COBRAR COSTO","sum"),
             mes_label=("MES_LABEL","first")
         ).reset_index().sort_values("MES")
         fig = go.Figure()
         fig.add_bar(x=tienda_mes["mes_label"], y=tienda_mes["faltantes"].abs(),
-                    name="Faltantes", marker_color=C_RED, opacity=0.7)
+                    name="Faltante (Costo)", marker_color=C_RED, opacity=0.7)
         fig.add_bar(x=tienda_mes["mes_label"], y=tienda_mes["sobrantes"],
-                    name="Sobrantes", marker_color=C_GREEN, opacity=0.7)
+                    name="Sobrante (Costo)", marker_color=C_GREEN, opacity=0.7)
         fig.add_scatter(x=tienda_mes["mes_label"], y=tienda_mes["cobrar_costo"].abs(),
                         name="A Cobrar Costo", mode="lines+markers",
                         line=dict(color=C_NAVY, width=2), marker=dict(size=7))
@@ -873,11 +1031,11 @@ with tabs[4]:
                           yaxis=dict(showgrid=True, gridcolor="#f0f0f0", tickprefix="$"))
         st.plotly_chart(fig, use_container_width=True)
     with col_c:
-        st.markdown('<div class="section-title">Composición de Diferencias</div>', unsafe_allow_html=True)
-        comp_vals = {"Faltantes":abs(tienda_df["FALTANTES PVP"].sum()),
-                     "Sobrantes":tienda_df["SOBRANTES PVP"].sum(),
-                     "Mal Estado":abs(tienda_df["MAL ESTADO CADUCADOS PVP"].sum()),
-                     "Cruces":abs(tienda_df["DIF. CRUCES PVP"].sum())}
+        st.markdown('<div class="section-title">Composición de Diferencias (Costo)</div>', unsafe_allow_html=True)
+        comp_vals = {"Faltante":abs(tienda_df["FALTANTE COSTO"].sum()),
+                     "Sobrante":tienda_df["SOBRANTE COSTO"].sum(),
+                     "Mal Estado y Caducados":abs(tienda_df["MAL ESTADO COSTO"].sum()),
+                     "Defectos de Fábrica":abs(tienda_df["DEFECTOS COSTO"].sum())}
         comp_df = pd.DataFrame({"Tipo":list(comp_vals.keys()),"Valor":list(comp_vals.values())})
         comp_df = comp_df[comp_df["Valor"] > 0]
         if len(comp_df) > 0:
@@ -891,27 +1049,36 @@ with tabs[4]:
             st.success("Sin diferencias registradas.")
 
     # Calcular columnas costo de forma segura antes de armar la tabla
+    tienda_df["_falt_c"]   = pd.to_numeric(tienda_df.get("FALTANTE COSTO", 0), errors="coerce").fillna(0)
+    tienda_df["_sobr_c"]   = pd.to_numeric(tienda_df.get("SOBRANTE COSTO", 0), errors="coerce").fillna(0)
     tienda_df["_cobrar_c"] = pd.to_numeric(tienda_df.get("RESULT. A COBRAR COSTO", 0), errors="coerce").fillna(0)
     tienda_df["_neto_c"]   = pd.to_numeric(tienda_df.get("TOTAL COSTO NETO",       0), errors="coerce").fillna(0)
 
-    tabla_t = tienda_df[["REF. INFORME","FECHA AUDITORÍA","AUDITOR",
-                          "TOTAL INVENTARIO COSTO","FALTANTES PVP","SOBRANTES PVP",
+    tabla_t = tienda_df[["FECHA AUDITORÍA","AUDITOR",
+                          "TOTAL INVENTARIO COSTO","_falt_c","_sobr_c",
                           "_cobrar_c","_neto_c",
-                          "SCORE (0/100)","RIESGO_NORM","OBSERVACIONES"]].copy()
+                          "SCORE (0/100)","RIESGO_NORM"]].copy()
     tabla_t["FECHA AUDITORÍA"] = tabla_t["FECHA AUDITORÍA"].dt.strftime("%d/%m/%Y")
-    for col in ["TOTAL INVENTARIO COSTO","FALTANTES PVP","SOBRANTES PVP","_cobrar_c","_neto_c"]:
+    for col in ["TOTAL INVENTARIO COSTO","_falt_c","_sobr_c","_cobrar_c","_neto_c"]:
         tabla_t[col] = tabla_t[col].apply(fmt_money)
-    tabla_t.columns = ["Ref. Informe","Fecha","Auditor","Inventario","Faltantes",
-                        "Sobrantes","A Cobrar Costo","Costo Neto","Score","Riesgo","Observaciones"]
-    tot_t = pd.DataFrame([{"Ref. Informe":"TOTAL","Fecha":"—","Auditor":"—",
+    tabla_t.columns = ["Fecha","Auditor","Inventario","Faltante Costo",
+                        "Sobrante Costo","A Cobrar Costo","Costo Neto","Score","Riesgo"]
+    tot_t = pd.DataFrame([{"Fecha":"TOTAL","Auditor":"—",
         "Inventario":fmt_money(tienda_df["TOTAL INVENTARIO COSTO"].sum()),
-        "Faltantes":fmt_money(tienda_df["FALTANTES PVP"].sum()),
-        "Sobrantes":fmt_money(tienda_df["SOBRANTES PVP"].sum()),
+        "Faltante Costo":fmt_money(tienda_df["_falt_c"].sum()),
+        "Sobrante Costo":fmt_money(tienda_df["_sobr_c"].sum()),
         "A Cobrar Costo":fmt_money(tienda_df["_cobrar_c"].sum()),
         "Costo Neto":fmt_money(tienda_df["_neto_c"].sum()),
-        "Score":round(tienda_df["SCORE (0/100)"].mean(),1),"Riesgo":"—","Observaciones":"—"}])
+        "Score":round(tienda_df["SCORE (0/100)"].mean(),1),"Riesgo":"—"}])
     tabla_t_full = pd.concat([tabla_t, tot_t], ignore_index=True)
-    st.dataframe(tabla_t_full, use_container_width=True, hide_index=True)
+
+    def _resaltar_total(row):
+        if row["Fecha"] == "TOTAL":
+            return ["background-color:#E6F1FB;font-weight:600"] * len(row)
+        return [""] * len(row)
+
+    st.dataframe(tabla_t_full.style.apply(_resaltar_total, axis=1),
+                 use_container_width=True, hide_index=True)
     download_button_excel(tabla_t_full, f"tienda_{sel_tienda.replace(' ','_')[:30]}_{datetime.today().strftime('%Y%m%d')}.xlsx",
                           "⬇ Exportar historial de tienda")
 
@@ -930,16 +1097,16 @@ with tabs[5]:
                                         "FALTANTES CRUCES":"FALTANTE CRUCE"}))
     col_s1, col_s2 = st.columns(2)
     with col_s1:
-        st.markdown('<div class="section-title">Top 15 SKUs — Mayor Faltante PVP</div>', unsafe_allow_html=True)
+        st.markdown('<div class="section-title">Top 15 SKUs — Mayor Faltante (Costo)</div>', unsafe_allow_html=True)
         falt_sku = (sku_filt[sku_filt["TIPO_NORM"].str.contains("FALTANTE",na=False)]
                     .groupby("DESCRIPCIÓN")
-                    .agg(pvp_total=("PVP TOTAL","sum"), n=("MATERIAL (SKU)","count"))
-                    .reset_index().nsmallest(15,"pvp_total"))
+                    .agg(costo_total=("COSTO TOTAL","sum"), n=("MATERIAL (SKU)","count"))
+                    .reset_index().nsmallest(15,"costo_total"))
         falt_sku["DESCRIPCIÓN"] = falt_sku["DESCRIPCIÓN"].str[:35]
-        fig = px.bar(falt_sku, x="pvp_total", y="DESCRIPCIÓN", orientation="h",
-                     color="pvp_total", color_continuous_scale=["#E24B4A","#EF9F27"],
-                     labels={"pvp_total":"PVP Total","DESCRIPCIÓN":""},
-                     text=falt_sku["pvp_total"].apply(fmt_money))
+        fig = px.bar(falt_sku, x="costo_total", y="DESCRIPCIÓN", orientation="h",
+                     color="costo_total", color_continuous_scale=["#E24B4A","#EF9F27"],
+                     labels={"costo_total":"Costo Total","DESCRIPCIÓN":""},
+                     text=falt_sku["costo_total"].apply(fmt_money))
         fig.update_layout(height=380, plot_bgcolor="white", paper_bgcolor="white",
                           margin=dict(l=0,r=80,t=10,b=0), coloraxis_showscale=False,
                           xaxis=dict(tickprefix="$",showgrid=True,gridcolor="#f0f0f0"),
@@ -949,7 +1116,7 @@ with tabs[5]:
     with col_s2:
         st.markdown('<div class="section-title">Distribución por Tipo de Hallazgo</div>', unsafe_allow_html=True)
         tipo_agg = (sku_filt.groupby("TIPO_NORM")
-                    .agg(n=("MATERIAL (SKU)","count"), pvp=("PVP TOTAL","sum"))
+                    .agg(n=("MATERIAL (SKU)","count"), costo=("COSTO TOTAL","sum"))
                     .reset_index().sort_values("n",ascending=False))
         fig2 = px.bar(tipo_agg, x="n", y="TIPO_NORM", orientation="h",
                       color_discrete_sequence=[C_BLUE], labels={"n":"Cantidad","TIPO_NORM":""}, text="n")
@@ -958,25 +1125,27 @@ with tabs[5]:
                            yaxis=dict(autorange="reversed"))
         fig2.update_traces(textposition="outside")
         st.plotly_chart(fig2, use_container_width=True)
-        st.markdown('<div class="section-title">Impacto PVP por Tipo</div>', unsafe_allow_html=True)
+        st.markdown('<div class="section-title">Impacto en Costo por Tipo</div>', unsafe_allow_html=True)
         for _, row in tipo_agg.iterrows():
             color = C_RED if "FALTANTE" in row["TIPO_NORM"] else C_GREEN if "SOBRANTE" in row["TIPO_NORM"] else C_AMBER
             st.markdown(f"""<div style="display:flex;justify-content:space-between;padding:5px 8px;
                 border-bottom:0.5px solid #eee;font-size:12px">
               <span>{row['TIPO_NORM']}</span>
-              <span style="font-weight:600;color:{color}">{fmt_money(row['pvp'])}</span>
+              <span style="font-weight:600;color:{color}">{fmt_money(row['costo'])}</span>
             </div>""", unsafe_allow_html=True)
 
     st.markdown('<div class="section-title">Tabla Detalle SKUs</div>', unsafe_allow_html=True)
     tabla_sku = sku_filt[["TIPO HALLAZGO","MATERIAL (SKU)","DESCRIPCIÓN","ALMACÉN",
-                           "CANTIDAD","PVP UNITARIO","PVP TOTAL","COSTO TOTAL","FECHA AUDITORÍA"]].copy()
+                           "CANTIDAD","COSTO UNITARIO","COSTO TOTAL","FECHA AUDITORÍA"]].copy()
     tabla_sku["FECHA AUDITORÍA"] = pd.to_datetime(tabla_sku["FECHA AUDITORÍA"], errors="coerce").dt.strftime("%d/%m/%Y")
-    for col in ["PVP UNITARIO","PVP TOTAL","COSTO TOTAL"]:
+    # FIX: ordenar por el valor numérico ANTES de formatear a texto
+    # (el original ordenaba "PVP TOTAL" ya convertido a string "$1,234.00",
+    # lo que da un orden alfabético, no numérico)
+    tabla_sku = tabla_sku.sort_values("COSTO TOTAL")
+    for col in ["COSTO UNITARIO","COSTO TOTAL"]:
         tabla_sku[col] = tabla_sku[col].apply(fmt_money)
-    tabla_sku = tabla_sku.sort_values("PVP TOTAL")
     tot_sku = pd.DataFrame([{"TIPO HALLAZGO":"TOTAL","MATERIAL (SKU)":"—","DESCRIPCIÓN":"—",
-        "ALMACÉN":"—","CANTIDAD":int(sku_filt["CANTIDAD"].sum()),"PVP UNITARIO":"—",
-        "PVP TOTAL":fmt_money(sku_filt["PVP TOTAL"].sum()),
+        "ALMACÉN":"—","CANTIDAD":int(sku_filt["CANTIDAD"].sum()),"COSTO UNITARIO":"—",
         "COSTO TOTAL":fmt_money(sku_filt["COSTO TOTAL"].sum()),"FECHA AUDITORÍA":"—"}])
     tabla_sku_full = pd.concat([tabla_sku, tot_sku], ignore_index=True)
     st.dataframe(tabla_sku_full, use_container_width=True, hide_index=True)
@@ -1074,13 +1243,13 @@ with tabs[6]:
 
     st.markdown('<div class="section-title">Tabla Completa de Prioridades</div>', unsafe_allow_html=True)
     tabla_ia = ia_top[["ALMACÉN","ZONA","LÍNEA","DÍAS SIN AUDITAR","SCORE (0/100)",
-                        "RESULT. NETO PVP","RIESGO_NORM","PRIORIDAD_SCORE","RECOMENDACIÓN"]].copy()
-    tabla_ia["RESULT. NETO PVP"]  = tabla_ia["RESULT. NETO PVP"].apply(fmt_money)
+                        "RESULT. A COBRAR COSTO","RIESGO_NORM","PRIORIDAD_SCORE","RECOMENDACIÓN"]].copy()
+    tabla_ia["RESULT. A COBRAR COSTO"] = tabla_ia["RESULT. A COBRAR COSTO"].apply(fmt_money)
     tabla_ia["PRIORIDAD_SCORE"]   = tabla_ia["PRIORIDAD_SCORE"].round(1)
     tabla_ia["SCORE (0/100)"]     = tabla_ia["SCORE (0/100)"].round(1)
     tabla_ia["DÍAS SIN AUDITAR"]  = tabla_ia["DÍAS SIN AUDITAR"].astype(int)
     tabla_ia.columns = ["Almacén","Zona","Línea","Días s/auditar",
-                         "Score","Result. Neto","Riesgo","Score IA","Recomendación"]
+                         "Score","A Cobrar Costo","Riesgo","Score IA","Recomendación"]
     st.dataframe(tabla_ia, use_container_width=True, hide_index=True)
     download_button_excel(tabla_ia, f"prioridades_ia_{datetime.today().strftime('%Y%m%d')}.xlsx",
                           "⬇ Exportar prioridades IA")
@@ -1091,12 +1260,23 @@ with tabs[6]:
 # ═══════════════════════════════════════════════
 with tabs[7]:
     st.markdown('<div class="section-title">Tendencia Mensual</div>', unsafe_allow_html=True)
-    mes_agg = dff.groupby("MES").agg(
+
+    # Filtro local por línea — independiente del filtro global del sidebar,
+    # permite comparar varias líneas a la vez dentro de esta pestaña.
+    lineas_disp_tend = sorted(dff["LÍNEA"].dropna().unique().tolist())
+    sel_lineas_tend = st.multiselect("Filtrar por línea (Tendencia)", lineas_disp_tend,
+                                      default=lineas_disp_tend, key="tendencia_filtro_linea")
+    dff_tend = dff[dff["LÍNEA"].isin(sel_lineas_tend)] if sel_lineas_tend else dff.iloc[0:0]
+
+    if len(dff_tend) == 0:
+        st.info("Selecciona al menos una línea para ver la tendencia mensual.")
+        st.stop()
+
+    mes_agg = dff_tend.groupby("MES").agg(
         auditorias=("No.","count"), inventario=("TOTAL INVENTARIO COSTO","sum"),
-        faltantes=("FALTANTES PVP","sum"), sobrantes=("SOBRANTES PVP","sum"),
+        faltantes=("FALTANTE COSTO","sum"), sobrantes=("SOBRANTE COSTO","sum"),
         cobrar_costo=("RESULT. A COBRAR COSTO","sum"),
-        neto_costo=("TOTAL COSTO NETO","sum"),
-        mal_estado=("MAL ESTADO CADUCADOS PVP","sum"), score_prom=("SCORE (0/100)","mean"),
+        mal_estado=("MAL ESTADO COSTO","sum"), score_prom=("SCORE (0/100)","mean"),
         mes_label=("MES_LABEL","first"),
     ).reset_index().sort_values("MES")
 
@@ -1108,12 +1288,12 @@ with tabs[7]:
     c3.markdown(f'<div class="kpi-card" style="border-top-color:{C_RED}"><div class="kpi-label">Peor Mes</div><div class="kpi-value neg" style="font-size:18px">{peor_mes}</div><div class="kpi-sub">{fmt_money(mes_agg.loc[mes_agg["cobrar_costo"].idxmin(),"cobrar_costo"])}</div></div>', unsafe_allow_html=True)
     c4.markdown(f'<div class="kpi-card" style="border-top-color:{C_AMBER}"><div class="kpi-label">Promedio Mensual</div><div class="kpi-value neg">{fmt_money(mes_agg["cobrar_costo"].mean())}</div><div class="kpi-sub">A cobrar costo promedio</div></div>', unsafe_allow_html=True)
 
-    st.markdown('<div class="section-title">Faltantes vs Sobrantes por Mes</div>', unsafe_allow_html=True)
+    st.markdown('<div class="section-title">Faltante vs Sobrante (Costo) por Mes</div>', unsafe_allow_html=True)
     fig1 = go.Figure()
     fig1.add_bar(x=mes_agg["mes_label"], y=mes_agg["faltantes"].abs(),
-                 name="Faltantes", marker_color=C_RED, opacity=0.85)
+                 name="Faltante (Costo)", marker_color=C_RED, opacity=0.85)
     fig1.add_bar(x=mes_agg["mes_label"], y=mes_agg["sobrantes"],
-                 name="Sobrantes", marker_color=C_GREEN, opacity=0.85)
+                 name="Sobrante (Costo)", marker_color=C_GREEN, opacity=0.85)
     fig1.add_scatter(x=mes_agg["mes_label"], y=mes_agg["cobrar_costo"].abs(),
                      name="A Cobrar Costo", mode="lines+markers+text",
                      line=dict(color=C_NAVY,width=2.5), marker=dict(size=9,color=C_NAVY),
@@ -1148,7 +1328,7 @@ with tabs[7]:
         st.plotly_chart(fig3, use_container_width=True)
 
     st.markdown('<div class="section-title">Tendencia por Línea de Negocio</div>', unsafe_allow_html=True)
-    linea_mes = dff.groupby(["MES","LÍNEA"]).agg(
+    linea_mes = dff_tend.groupby(["MES","LÍNEA"]).agg(
         cobrar_costo=("RESULT. A COBRAR COSTO","sum"),
         mes_label=("MES_LABEL","first")
     ).reset_index().sort_values("MES")
@@ -1163,19 +1343,18 @@ with tabs[7]:
 
     st.markdown('<div class="section-title">Tabla Resumen Mensual</div>', unsafe_allow_html=True)
     tabla_mes = mes_agg[["mes_label","auditorias","inventario","faltantes",
-                           "sobrantes","cobrar_costo","neto_costo","mal_estado","score_prom"]].copy()
-    tabla_mes.columns = ["Mes","Auditorías","Inventario","Faltantes","Sobrantes",
-                          "A Cobrar Costo","Costo Neto","Mal Estado","Score Prom."]
-    for col in ["Inventario","Faltantes","Sobrantes","A Cobrar Costo","Costo Neto","Mal Estado"]:
+                           "sobrantes","cobrar_costo","mal_estado","score_prom"]].copy()
+    tabla_mes.columns = ["Mes","Auditorías","Inventario","Faltante Costo","Sobrante Costo",
+                          "A Cobrar Costo","Mal Estado Costo","Score Prom."]
+    for col in ["Inventario","Faltante Costo","Sobrante Costo","A Cobrar Costo","Mal Estado Costo"]:
         tabla_mes[col] = tabla_mes[col].apply(fmt_money)
     tabla_mes["Score Prom."] = tabla_mes["Score Prom."].round(1)
     tot_m = pd.DataFrame([{"Mes":"TOTAL","Auditorías":int(mes_agg["auditorias"].sum()),
         "Inventario":fmt_money(mes_agg["inventario"].sum()),
-        "Faltantes":fmt_money(mes_agg["faltantes"].sum()),
-        "Sobrantes":fmt_money(mes_agg["sobrantes"].sum()),
+        "Faltante Costo":fmt_money(mes_agg["faltantes"].sum()),
+        "Sobrante Costo":fmt_money(mes_agg["sobrantes"].sum()),
         "A Cobrar Costo":fmt_money(mes_agg["cobrar_costo"].sum()),
-        "Costo Neto":fmt_money(mes_agg["neto_costo"].sum()),
-        "Mal Estado":fmt_money(mes_agg["mal_estado"].sum()),
+        "Mal Estado Costo":fmt_money(mes_agg["mal_estado"].sum()),
         "Score Prom.":round(mes_agg["score_prom"].mean(),1)}])
     tabla_mes_full = pd.concat([tabla_mes, tot_m], ignore_index=True)
     st.dataframe(tabla_mes_full, use_container_width=True, hide_index=True)
@@ -1214,7 +1393,6 @@ with tabs[8]:
     dff_c["Ajuste (Si/No)"]  = dff_c.get("Ajuste (Si/No)",  pd.Series(["No"]*len(dff_c))).fillna("No")
 
     # KPIs principales
-    total_cobrar_pvp   = dff_c["RESULT. A COBRAR PVP"].sum()
     total_cobrar_costo = dff_c["RESULT. A COBRAR COSTO"].sum()
     total_cobrado      = dff_c["VALOR COBRADO"].sum()
     total_neto_costo   = dff_c["TOTAL COSTO NETO"].sum()
@@ -1227,7 +1405,7 @@ with tabs[8]:
     pct_recuperado = (total_cobrado / abs(total_cobrar_costo) * 100) if total_cobrar_costo != 0 else 0
 
     c1,c2,c3,c4 = st.columns(4)
-    c1.markdown(f'<div class="kpi-card" style="border-top-color:{C_RED}"><div class="kpi-label">Total a Cobrar (Costo)</div><div class="kpi-value neg">{fmt_money(total_cobrar_costo)}</div><div class="kpi-sub">PVP: {fmt_money(total_cobrar_pvp)}</div></div>', unsafe_allow_html=True)
+    c1.markdown(f'<div class="kpi-card" style="border-top-color:{C_RED}"><div class="kpi-label">Total a Cobrar (Costo)</div><div class="kpi-value neg">{fmt_money(total_cobrar_costo)}</div><div class="kpi-sub">Faltante al costo</div></div>', unsafe_allow_html=True)
     c2.markdown(f'<div class="kpi-card" style="border-top-color:{C_GREEN}"><div class="kpi-label">Total Cobrado</div><div class="kpi-value {"pos" if total_cobrado > 0 else "neu"}">{fmt_money(total_cobrado)}</div><div class="kpi-sub">{pct_recuperado:.1f}% recuperado</div></div>', unsafe_allow_html=True)
     c3.markdown(f'<div class="kpi-card" style="border-top-color:{C_AMBER}"><div class="kpi-label">Pendiente de Cobro</div><div class="kpi-value neg">{n_pendiente} auditorías</div><div class="kpi-sub">Costo neto: {fmt_money(total_neto_costo)}</div></div>', unsafe_allow_html=True)
     c4.markdown(f'<div class="kpi-card" style="border-top-color:{C_PURPLE}"><div class="kpi-label">Pend. Facturar (Costo)</div><div class="kpi-value neg">{fmt_money(pend_facturar)}</div><div class="kpi-sub">{n_con_ajuste} auditorías con ajuste</div></div>', unsafe_allow_html=True)
@@ -1404,14 +1582,14 @@ with tabs[8]:
     # Tabla detalle
     st.markdown('<div class="section-title">Tabla Detalle de Cobro</div>', unsafe_allow_html=True)
     cols_tabla = ["ALMACÉN","ZONA","LÍNEA","FECHA AUDITORÍA","AUDITOR",
-                  "RESULT. A COBRAR PVP","RESULT. A COBRAR COSTO",
+                  "RESULT. A COBRAR COSTO",
                   "TOTAL COSTO NETO","VALOR COBRADO",
                   "% COBRO VS A COBRAR COSTO","ESTADO COBRO","ESTADO REGISTRO","Ajuste (Si/No)"]
     cols_exist  = [c for c in cols_tabla if c in dff_c.columns]
     tabla_cobro = dff_c[cols_exist].copy()
     if "FECHA AUDITORÍA" in tabla_cobro.columns:
         tabla_cobro["FECHA AUDITORÍA"] = pd.to_datetime(tabla_cobro["FECHA AUDITORÍA"], errors="coerce").dt.strftime("%d/%m/%Y")
-    for col in ["RESULT. A COBRAR PVP","RESULT. A COBRAR COSTO","TOTAL COSTO NETO","VALOR COBRADO"]:
+    for col in ["RESULT. A COBRAR COSTO","TOTAL COSTO NETO","VALOR COBRADO"]:
         if col in tabla_cobro.columns:
             tabla_cobro[col] = tabla_cobro[col].apply(fmt_money)
     if "% COBRO VS A COBRAR COSTO" in tabla_cobro.columns:
@@ -1423,7 +1601,6 @@ with tabs[8]:
     # Fila total
     tot_cobro = {c: "—" for c in tabla_cobro.columns}
     tot_cobro["ALMACÉN"]                   = "TOTAL"
-    tot_cobro["RESULT. A COBRAR PVP"]      = fmt_money(dff_c["RESULT. A COBRAR PVP"].sum())
     tot_cobro["RESULT. A COBRAR COSTO"]    = fmt_money(dff_c["RESULT. A COBRAR COSTO"].sum())
     tot_cobro["TOTAL COSTO NETO"]          = fmt_money(dff_c["TOTAL COSTO NETO"].sum())
     tot_cobro["VALOR COBRADO"]             = fmt_money(dff_c["VALOR COBRADO"].sum())
