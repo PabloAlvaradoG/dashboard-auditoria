@@ -546,18 +546,45 @@ st.markdown("""
 
 col_atajo, col_desde, col_hasta, col_info = st.columns([3, 1.5, 1.5, 1.5])
 
+opciones_periodo   = list(periodos_con_datos.keys())
+etiqueta_anio_actual = f"Este año ({hoy.year})"
+# Por defecto: si hay datos del año actual, abrir el dashboard ya filtrado ahí.
+indice_default = (opciones_periodo.index(etiqueta_anio_actual)
+                   if etiqueta_anio_actual in opciones_periodo else 0)
+
+def _aplicar_atajo_periodo():
+    """Propaga el período rápido elegido a los campos Desde/Hasta.
+    FIX: st.date_input ignora `value=` en reruns posteriores una vez que
+    su `key` ya tiene un valor en session_state — por eso elegir un período
+    rápido no movía los campos de fecha. Este callback fuerza la actualización
+    de session_state ANTES de que los date_input se vuelvan a dibujar."""
+    ini, fin = periodos_con_datos[st.session_state["atajo_periodo"]]
+    st.session_state["fecha_desde"] = ini
+    st.session_state["fecha_hasta"] = fin
+
 with col_atajo:
     atajo = st.selectbox(
         "Período rápido",
-        options=list(periodos_con_datos.keys()),
-        label_visibility="collapsed"
+        options=opciones_periodo,
+        index=indice_default,
+        label_visibility="collapsed",
+        key="atajo_periodo",
+        on_change=_aplicar_atajo_periodo,
     )
     rango_sugerido = periodos_con_datos[atajo]
+
+# Sembrar el estado inicial una sola vez. Después de esto, el callback
+# _aplicar_atajo_periodo es quien actualiza fecha_desde/fecha_hasta —
+# por eso NO se vuelve a pasar `value=` a los date_input (evita el warning
+# de Streamlit por mezclar `value` y Session State).
+if "fecha_desde" not in st.session_state:
+    st.session_state["fecha_desde"] = rango_sugerido[0]
+if "fecha_hasta" not in st.session_state:
+    st.session_state["fecha_hasta"] = rango_sugerido[1]
 
 with col_desde:
     fecha_desde = st.date_input(
         "Desde",
-        value=rango_sugerido[0],
         min_value=fecha_min,
         max_value=fecha_max,
         key="fecha_desde"
@@ -566,7 +593,6 @@ with col_desde:
 with col_hasta:
     fecha_hasta = st.date_input(
         "Hasta",
-        value=rango_sugerido[1],
         min_value=fecha_min,
         max_value=fecha_max,
         key="fecha_hasta"
