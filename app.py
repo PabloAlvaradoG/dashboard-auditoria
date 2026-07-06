@@ -460,7 +460,7 @@ def load_data(file_bytes: bytes, config_bytes: bytes = None):
     else:
         tiendas_info['cobertura'] = None
 
-    return df, last_audit, df_sku, tiendas_activas, df_config_tiendas, tiendas_info
+    return df, last_audit, df_sku, tiendas_activas, df_config_tiendas, tiendas_info, df_auditor_tipo
 
 
 # ─────────────────────────────────────────────
@@ -514,7 +514,7 @@ with st.sidebar:
     # Carga con manejo de errores
     try:
         with st.spinner("Cargando datos..."):
-            df, last_audit, df_sku, tiendas_activas, df_config_tiendas, tiendas_info = load_data(file_bytes, config_bytes)
+            df, last_audit, df_sku, tiendas_activas, df_config_tiendas, tiendas_info, df_auditor_tipo = load_data(file_bytes, config_bytes)
     except Exception as e:
         st.error(f"❌ Error al leer el archivo: {e}")
         st.info("Verifica que el archivo tenga las hojas: Registro_Auditorias, Detalle_SKUs")
@@ -756,7 +756,8 @@ tabs = st.tabs([
     "06 · SKUs",
     "07 · Prioridades IA",
     "08 · Tendencia Mensual",
-    "09 · Gestión de Cobro"
+    "09 · Gestión de Cobro",
+    "10 · KPI Auditores"
 ])
 
 # ═══════════════════════════════════════════════
@@ -1987,3 +1988,189 @@ with tabs[8]:
                           f"gestion_cobro_{datetime.today().strftime('%Y%m%d')}.xlsx",
                           "⬇ Exportar gestión de cobro",
                           money_cols=["RESULT. A COBRAR COSTO","TOTAL COSTO NETO","VALOR COBRADO"])
+
+# ═══════════════════════════════════════════════
+# PÁGINA 10 — KPI AUDITORES
+# Evalúa el cumplimiento de la meta mensual de auditorías (12/mes, solo
+# Retail) sobre ciclos del día 26 al 25 de cada mes. Filtros propios
+# (ciclo + tipo de auditor), independientes del sidebar, porque esta
+# pestaña necesita ver a TODOS los auditores a la vez para comparar.
+# ═══════════════════════════════════════════════
+with tabs[9]:
+    st.markdown('<div class="section-title">KPI Auditores — Cumplimiento de Meta Mensual</div>', unsafe_allow_html=True)
+    st.caption("Ciclo de evaluación del 26 al 25 de cada mes · Meta: 12 auditorías/mes, aplica solo a auditores tipo Retail · Filtros independientes del panel lateral.")
+
+    MESES_ES = {1:"Ene",2:"Feb",3:"Mar",4:"Abr",5:"May",6:"Jun",
+                7:"Jul",8:"Ago",9:"Sep",10:"Oct",11:"Nov",12:"Dic"}
+
+    def _generar_ciclos_26_25(inicio_rango, fin_rango):
+        """Genera tuplas (inicio, fin) de ciclos 26→25 que cubren el rango dado."""
+        ciclos = []
+        cursor = pd.Timestamp(inicio_rango)
+        ini = cursor.replace(day=26) if cursor.day >= 26 else (cursor - pd.DateOffset(months=1)).replace(day=26)
+        fin_rango_ts = pd.Timestamp(fin_rango)
+        while ini <= fin_rango_ts:
+            fin = (ini + pd.DateOffset(months=1)).replace(day=25)
+            ciclos.append((ini, fin))
+            ini = ini + pd.DateOffset(months=1)
+        return ciclos
+
+    def _label_ciclo(ini, fin):
+        return f"{ini.day} {MESES_ES[ini.month]} – {fin.day} {MESES_ES[fin.month]} {fin.year}"
+
+    hoy_kpi = datetime.today().date()
+    hoy_ts = pd.Timestamp(hoy_kpi)
+    ciclos_kpi = list(reversed(_generar_ciclos_26_25(fecha_min, max(fecha_max, hoy_kpi))))
+    ciclo_labels = [_label_ciclo(i, f) for i, f in ciclos_kpi]
+    ciclo_map = dict(zip(ciclo_labels, ciclos_kpi))
+
+    col_kf1, col_kf2 = st.columns([1.4, 1])
+    with col_kf1:
+        sel_ciclo_label = st.selectbox("Ciclo de evaluación (26 al 25)", ciclo_labels, index=0, key="kpi_ciclo")
+    ini_sel, fin_sel = ciclo_map[sel_ciclo_label]
+
+    tipos_disp_kpi = ["Todos"] + sorted(df["TIPO_AUDITOR"].dropna().unique().tolist())
+    with col_kf2:
+        sel_tipo_kpi = st.selectbox("Tipo de auditor", tipos_disp_kpi, key="kpi_tipo_auditor")
+
+    en_curso           = hoy_ts <= fin_sel
+    dias_totales       = (fin_sel - ini_sel).days + 1
+    dias_transcurridos = max(((min(hoy_ts, fin_sel) - ini_sel).days + 1), 1)
+
+    st.markdown(f"""<div style="font-size:11px;color:#666;margin:-6px 0 12px 2px;">
+      📅 Ciclo: {ini_sel.strftime('%d/%m/%Y')} – {fin_sel.strftime('%d/%m/%Y')}
+      {"· <strong>En curso</strong> (día " + str(dias_transcurridos) + " de " + str(dias_totales) + ")" if en_curso else "· Ciclo cerrado"}
+    </div>""", unsafe_allow_html=True)
+
+    df_ciclo = df[(df["FECHA AUDITORÍA"] >= ini_sel) & (df["FECHA AUDITORÍA"] <= fin_sel)].copy()
+
+    # ── Roster: todos los auditores conocidos (hoja 'Correos auditores'),
+    # incluso los que no realizaron NINGUNA auditoría en este ciclo — un 0
+    # también es información relevante para el cumplimiento. Se suman además
+    # auditores que sí auditaron en el ciclo pero no están en esa hoja.
+    if df_auditor_tipo is not None:
+        roster = df_auditor_tipo[["Auditor responsable", "Tipo auditor"]].copy()
+        roster["AUDITOR"] = roster["Auditor responsable"].apply(normalizar_auditor)
+        roster = roster.rename(columns={"Tipo auditor": "TIPO_AUDITOR"})[["AUDITOR", "TIPO_AUDITOR"]]
+        extra = df_ciclo[["AUDITOR", "TIPO_AUDITOR"]].drop_duplicates()
+        roster = pd.concat([roster, extra]).drop_duplicates(subset="AUDITOR", keep="first")
+    else:
+        roster = df_ciclo[["AUDITOR", "TIPO_AUDITOR"]].drop_duplicates()
+
+    if sel_tipo_kpi != "Todos":
+        roster = roster[roster["TIPO_AUDITOR"] == sel_tipo_kpi]
+
+    if len(roster) == 0:
+        st.info("No hay auditores para el tipo seleccionado.")
+        st.stop()
+
+    realizadas = df_ciclo.groupby("AUDITOR").size().rename("realizadas")
+    kpi_agg = roster.merge(realizadas, on="AUDITOR", how="left")
+    kpi_agg["realizadas"] = kpi_agg["realizadas"].fillna(0).astype(int)
+
+    # Meta = 12 solo para Retail. Coral / Sin clasificar -> "No aplica".
+    META = 12
+    kpi_agg["meta"] = kpi_agg["TIPO_AUDITOR"].apply(lambda t: META if t == "Retail" else None)
+    kpi_agg["cumplimiento_real"] = kpi_agg.apply(
+        lambda r: (r["realizadas"] / r["meta"] * 100) if r["meta"] else None, axis=1)
+    kpi_agg["proyeccion_cierre"] = kpi_agg["realizadas"] / dias_transcurridos * dias_totales
+    kpi_agg["cumplimiento_proyectado"] = kpi_agg.apply(
+        lambda r: (r["proyeccion_cierre"] / r["meta"] * 100) if r["meta"] else None, axis=1)
+    kpi_agg = kpi_agg.sort_values("realizadas", ascending=False)
+
+    # ── KPIs generales (solo sobre auditores con meta, i.e. Retail) ──
+    evaluables  = kpi_agg[kpi_agg["meta"].notna()]
+    n_evaluados = len(evaluables)
+    cump_usado  = "cumplimiento_proyectado" if en_curso else "cumplimiento_real"
+    cump_prom   = evaluables[cump_usado].mean() if n_evaluados else 0
+    n_en_meta   = int((evaluables[cump_usado] >= 90).sum()) if n_evaluados else 0
+    n_bajo_meta = int((evaluables[cump_usado] < 50).sum()) if n_evaluados else 0
+
+    c1, c2, c3, c4 = st.columns(4)
+    c1.markdown(f'<div class="kpi-card" style="border-top-color:{C_BLUE}"><div class="kpi-label">Auditores Retail Evaluados</div><div class="kpi-value neu">{n_evaluados}</div><div class="kpi-sub">meta 12 auditorías/mes</div></div>', unsafe_allow_html=True)
+    c2.markdown(f'<div class="kpi-card" style="border-top-color:{C_TEAL}"><div class="kpi-label">Cumplimiento Promedio</div><div class="kpi-value neu">{cump_prom:.0f}%</div><div class="kpi-sub">{"proyectado al cierre" if en_curso else "del ciclo cerrado"}</div></div>', unsafe_allow_html=True)
+    c3.markdown(f'<div class="kpi-card" style="border-top-color:{C_GREEN}"><div class="kpi-label">En Meta (≥90%)</div><div class="kpi-value pos">{n_en_meta}</div><div class="kpi-sub">de {n_evaluados} evaluados</div></div>', unsafe_allow_html=True)
+    c4.markdown(f'<div class="kpi-card" style="border-top-color:{C_RED}"><div class="kpi-label">Bajo Cumplimiento (&lt;50%)</div><div class="kpi-value neg">{n_bajo_meta}</div><div class="kpi-sub">requieren seguimiento</div></div>', unsafe_allow_html=True)
+
+    # ── Gráfico de cumplimiento por auditor ──
+    st.markdown('<div class="section-title">Cumplimiento por Auditor</div>', unsafe_allow_html=True)
+    graf_df = kpi_agg.copy()
+    graf_df["cump_mostrar"] = graf_df[cump_usado]
+    graf_df = graf_df.sort_values("cump_mostrar", na_position="first")
+    colores_cump, textos_cump = [], []
+    for v, meta in zip(graf_df["cump_mostrar"], graf_df["meta"]):
+        if pd.isna(meta):
+            colores_cump.append("#C9C9C9"); textos_cump.append("No aplica")
+        elif v < 50:
+            colores_cump.append(C_RED); textos_cump.append(f"{v:.0f}%")
+        elif v < 90:
+            colores_cump.append(C_AMBER); textos_cump.append(f"{v:.0f}%")
+        else:
+            colores_cump.append(C_GREEN); textos_cump.append(f"{v:.0f}%")
+    fig_kpi = go.Figure(go.Bar(
+        x=graf_df["cump_mostrar"].fillna(0).clip(lower=0), y=graf_df["AUDITOR"], orientation="h",
+        marker_color=colores_cump, text=textos_cump, textposition="outside"))
+    fig_kpi.add_vline(x=90, line_dash="dash", line_color=C_GREEN, opacity=0.5)
+    fig_kpi.update_layout(height=max(260, 28*len(graf_df)), plot_bgcolor="white", paper_bgcolor="white",
+                          margin=dict(l=0,r=60,t=10,b=0),
+                          xaxis=dict(title="% Cumplimiento", showgrid=True, gridcolor="#f0f0f0"))
+    st.plotly_chart(fig_kpi, use_container_width=True)
+    st.caption("Barras grises = auditores tipo Coral / sin clasificar, sin meta definida para esta evaluación. Línea punteada = umbral de 90% (verde).")
+
+    # ── Tabla resumen por auditor ──
+    st.markdown('<div class="section-title">Tabla Resumen de Cumplimiento</div>', unsafe_allow_html=True)
+    tabla_kpi = kpi_agg.copy()
+    tabla_kpi["Meta"] = tabla_kpi["meta"].apply(lambda m: str(int(m)) if pd.notna(m) else "No aplica")
+    tabla_kpi["% Cumplimiento Real"] = tabla_kpi["cumplimiento_real"].apply(lambda v: f"{v:.0f}%" if pd.notna(v) else "No aplica")
+    if en_curso:
+        tabla_kpi["Proyección al Cierre"] = tabla_kpi["proyeccion_cierre"].round(1)
+        tabla_kpi["% Cumplimiento Proyectado"] = tabla_kpi["cumplimiento_proyectado"].apply(lambda v: f"{v:.0f}%" if pd.notna(v) else "No aplica")
+        tabla_kpi = tabla_kpi[["AUDITOR","TIPO_AUDITOR","realizadas","Meta","% Cumplimiento Real",
+                                "Proyección al Cierre","% Cumplimiento Proyectado"]]
+        tabla_kpi.columns = ["Auditor","Tipo","Auditorías Realizadas","Meta","% Cumplimiento Real",
+                              "Proyección al Cierre","% Cumplimiento Proyectado"]
+    else:
+        tabla_kpi = tabla_kpi[["AUDITOR","TIPO_AUDITOR","realizadas","Meta","% Cumplimiento Real"]]
+        tabla_kpi.columns = ["Auditor","Tipo","Auditorías Realizadas","Meta","% Cumplimiento Real"]
+    st.dataframe(tabla_kpi, use_container_width=True, hide_index=True)
+    download_button_excel(tabla_kpi, f"kpi_auditores_resumen_{datetime.today().strftime('%Y%m%d')}.xlsx",
+                          "⬇ Exportar resumen KPI")
+
+    # ── Tabla detalle de auditorías del ciclo ──
+    st.markdown('<div class="section-title">Detalle de Auditorías del Ciclo</div>', unsafe_allow_html=True)
+    detalle_kpi = df_ciclo.copy()
+    if sel_tipo_kpi != "Todos":
+        detalle_kpi = detalle_kpi[detalle_kpi["TIPO_AUDITOR"] == sel_tipo_kpi]
+
+    cols_detalle = ["AUDITOR","LÍNEA","CE.","ALMACÉN","FECHA AUDITORÍA",
+                     "TOTAL INVENTARIO COSTO","RESULT. A COBRAR PVP","RESULT. A COBRAR COSTO","ESTADO REGISTRO"]
+    nombres_detalle = ["Auditor","Subgrupo Línea","Centro SAP","Tienda","Fecha Auditoría",
+                        "Total Inventario Costo","A Cobrar PVP","A Cobrar Costo","Estado de Registro"]
+    mapa_nombres = dict(zip(cols_detalle, nombres_detalle))
+    cols_detalle_exist = [c for c in cols_detalle if c in detalle_kpi.columns]
+
+    tabla_detalle_kpi = detalle_kpi[cols_detalle_exist].copy().sort_values("FECHA AUDITORÍA")
+    tabla_detalle_kpi["FECHA AUDITORÍA"] = pd.to_datetime(
+        tabla_detalle_kpi["FECHA AUDITORÍA"], errors="coerce").dt.strftime("%d/%m/%Y")
+    if "CE." in tabla_detalle_kpi.columns:
+        tabla_detalle_kpi["CE."] = pd.to_numeric(tabla_detalle_kpi["CE."], errors="coerce").apply(
+            lambda v: str(int(v)) if pd.notna(v) else "—")
+
+    cols_money_detalle = [c for c in ["TOTAL INVENTARIO COSTO","RESULT. A COBRAR PVP","RESULT. A COBRAR COSTO"]
+                          if c in tabla_detalle_kpi.columns]
+    for col in cols_money_detalle:
+        tabla_detalle_kpi[col] = pd.to_numeric(tabla_detalle_kpi[col], errors="coerce").fillna(0).apply(fmt_money)
+
+    tabla_detalle_kpi = tabla_detalle_kpi.rename(columns=mapa_nombres)
+    if len(tabla_detalle_kpi) == 0:
+        st.info("No hay auditorías registradas en este ciclo para el tipo de auditor seleccionado.")
+    else:
+        nombres_money_detalle = [mapa_nombres[c] for c in cols_money_detalle]
+        tot_detalle = {c: "—" for c in tabla_detalle_kpi.columns}
+        tot_detalle["Auditor"] = "TOTAL"
+        for c_orig, c_nom in zip(cols_money_detalle, nombres_money_detalle):
+            tot_detalle[c_nom] = fmt_money(pd.to_numeric(detalle_kpi[c_orig], errors="coerce").fillna(0).sum())
+        tabla_detalle_full = pd.concat([tabla_detalle_kpi, pd.DataFrame([tot_detalle])], ignore_index=True)
+        st.dataframe(tabla_detalle_full, use_container_width=True, hide_index=True)
+        download_button_excel(tabla_detalle_full, f"kpi_auditores_detalle_{datetime.today().strftime('%Y%m%d')}.xlsx",
+                              "⬇ Exportar detalle del ciclo", money_cols=nombres_money_detalle)
