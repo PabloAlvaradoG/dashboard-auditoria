@@ -38,43 +38,67 @@ st.set_page_config(
     initial_sidebar_state="expanded"
 )
 
+from ui.tema import aplicar_tema
+aplicar_tema()
+
 # ─────────────────────────────────────────────
 # ESTILOS CORPORATIVOS
 # ─────────────────────────────────────────────
 st.markdown("""
 <style>
-    .stApp { background-color: #F4F6F9; }
+    @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=IBM+Plex+Mono:wght@500;600&display=swap');
+
+    html, body, [class*="css"] { font-family: 'Inter', -apple-system, 'Segoe UI', sans-serif; }
+
+    .stApp { background: linear-gradient(180deg, #F7F9FC 0%, #F1F4F9 100%); }
+
     .corp-header {
-        background: linear-gradient(135deg, #042C53 0%, #185FA5 100%);
-        padding: 18px 28px; border-radius: 10px; margin-bottom: 20px;
+        background: linear-gradient(120deg, #071E33 0%, #0C447C 55%, #185FA5 100%);
+        padding: 20px 30px; border-radius: 14px; margin-bottom: 22px;
         display: flex; justify-content: space-between; align-items: center;
+        box-shadow: 0 8px 24px rgba(4,44,83,0.18);
+        position: relative; overflow: hidden;
     }
-    .corp-title { color: #E6F1FB; font-size: 20px; font-weight: 700; margin: 0; }
-    .corp-sub { color: #85B7EB; font-size: 12px; margin-top: 4px; }
-    .corp-badges { display: flex; gap: 8px; }
+    .corp-header::after {
+        content: ""; position: absolute; top: -60%; right: -8%;
+        width: 260px; height: 260px; border-radius: 50%;
+        background: radial-gradient(circle, rgba(255,255,255,0.10) 0%, rgba(255,255,255,0) 70%);
+    }
+    .corp-title { color: #EAF2FC; font-size: 21px; font-weight: 700; margin: 0; letter-spacing: .2px; }
+    .corp-sub { color: #9CC3EE; font-size: 12px; margin-top: 4px; }
+    .corp-badges { display: flex; gap: 8px; position: relative; z-index: 1; }
     .corp-badge {
-        background: rgba(255,255,255,0.15); color: #B5D4F4;
-        padding: 4px 12px; border-radius: 20px; font-size: 11px;
+        background: rgba(255,255,255,0.12); color: #CFE3FA;
+        padding: 4px 13px; border-radius: 20px; font-size: 11px;
+        border: 0.5px solid rgba(255,255,255,0.18);
     }
     .kpi-card {
-        background: white; border-radius: 10px; padding: 16px 18px;
-        border-top: 4px solid #378ADD;
-        box-shadow: 0 1px 4px rgba(0,0,0,0.06); margin-bottom: 8px;
+        background: linear-gradient(165deg, #FFFFFF 0%, #FBFCFE 100%);
+        border-radius: 14px; padding: 16px 20px;
+        border-top: 3px solid #378ADD;
+        box-shadow: 0 2px 10px rgba(15,40,70,0.07), 0 0.5px 0 rgba(15,40,70,0.04) inset;
+        margin-bottom: 10px;
+        transition: box-shadow .15s ease, transform .15s ease;
     }
-    .kpi-label { font-size: 11px; color: #888; font-weight: 500;
-                 text-transform: uppercase; letter-spacing: .5px; margin-bottom: 6px; }
-    .kpi-value { font-size: 24px; font-weight: 700; color: #1a1a2e; }
+    .kpi-card:hover {
+        box-shadow: 0 6px 18px rgba(15,40,70,0.12);
+        transform: translateY(-1px);
+    }
+    .kpi-label { font-size: 10.5px; color: #8792A2; font-weight: 600;
+                 text-transform: uppercase; letter-spacing: .6px; margin-bottom: 7px; }
+    .kpi-value { font-family: 'IBM Plex Mono', 'Inter', monospace; font-variant-numeric: tabular-nums;
+                 font-size: 23px; font-weight: 600; color: #1A2B42; letter-spacing: -.3px; }
     .kpi-value.neg { color: #A32D2D; }
-    .kpi-value.pos { color: #27AE60; }
+    .kpi-value.pos { color: #1E8449; }
     .kpi-value.neu { color: #185FA5; }
-    .kpi-sub { font-size: 11px; color: #aaa; margin-top: 4px; }
+    .kpi-sub { font-size: 11px; color: #9AA5B3; margin-top: 5px; }
     .section-title {
-        font-size: 13px; font-weight: 600; color: #042C53;
-        text-transform: uppercase; letter-spacing: .6px;
-        border-left: 4px solid #378ADD; padding-left: 10px;
-        margin: 20px 0 12px 0;
+        font-size: 12.5px; font-weight: 700; color: #042C53;
+        text-transform: uppercase; letter-spacing: .7px;
+        border-left: 4px solid #378ADD; padding-left: 11px;
+        margin: 22px 0 13px 0;
     }
-    [data-testid="stSidebar"] { background: #042C53 !important; }
+    [data-testid="stSidebar"] { background: linear-gradient(180deg, #071E33 0%, #0C2C4C 100%) !important; }
     [data-testid="stSidebar"] * { color: #B5D4F4 !important; }
     .dataframe { font-size: 12px !important; }
     #MainMenu {visibility: hidden;} footer {visibility: hidden;} header {visibility: hidden;}
@@ -675,7 +699,7 @@ with tabs[0]:
                                  color_discrete_sequence=[C_BLUE], text="Tiendas Activas")
                 fig_tl.update_layout(height=230, plot_bgcolor="white", paper_bgcolor="white",
                                       margin=dict(l=0,r=0,t=0,b=0),
-                                      xaxis=dict(showgrid=True, gridcolor="#f0f0f0"),
+                                      xaxis=dict(showgrid=True, gridcolor="#E7ECF3"),
                                       yaxis=dict(autorange="reversed"))
                 fig_tl.update_traces(textposition="outside")
                 st.plotly_chart(fig_tl, use_container_width=True)
@@ -745,7 +769,7 @@ with tabs[0]:
                                        text=[fmt_money(v) for v in soc_agg["cobrar"]], textposition="outside"))
             fig_soc.update_layout(height=220, plot_bgcolor="white", paper_bgcolor="white",
                                   margin=dict(l=0,r=80,t=10,b=0),
-                                  xaxis=dict(tickprefix="$", showgrid=True, gridcolor="#f0f0f0"),
+                                  xaxis=dict(tickprefix="$", showgrid=True, gridcolor="#E7ECF3"),
                                   yaxis=dict(autorange="reversed"))
             st.plotly_chart(fig_soc, use_container_width=True)
         with col_soc2:
@@ -777,7 +801,7 @@ with tabs[0]:
         fig.update_layout(barmode="group", height=280, plot_bgcolor="white", paper_bgcolor="white",
                           legend=dict(orientation="h", y=-0.2), margin=dict(l=0,r=0,t=10,b=0),
                           xaxis=dict(showgrid=False, tickangle=-45),
-                          yaxis=dict(showgrid=True, gridcolor="#f0f0f0", tickprefix="$"))
+                          yaxis=dict(showgrid=True, gridcolor="#E7ECF3", tickprefix="$"))
         st.plotly_chart(fig, use_container_width=True)
     with col_r:
         titulo_seccion("A Cobrar por Zona (Costo)")
@@ -790,7 +814,7 @@ with tabs[0]:
                       labels={"cobrar_costo":"A Cobrar Costo",COL_ZONA:""})
         fig2.update_layout(height=280, plot_bgcolor="white", paper_bgcolor="white",
                            margin=dict(l=0,r=0,t=10,b=0), coloraxis_showscale=False,
-                           xaxis=dict(tickprefix="$", showgrid=True, gridcolor="#f0f0f0"))
+                           xaxis=dict(tickprefix="$", showgrid=True, gridcolor="#E7ECF3"))
         st.plotly_chart(fig2, use_container_width=True)
 
     # EXPORT
@@ -878,7 +902,7 @@ with tabs[1]:
                      orientation="h", color_discrete_sequence=[C_BLUE],
                      labels={"auditorias":"Auditorías",COL_AUDITOR:""}, text="auditorias")
         fig.update_layout(height=260, plot_bgcolor="white", paper_bgcolor="white",
-                          margin=dict(l=0,r=0,t=10,b=0), xaxis=dict(showgrid=True, gridcolor="#f0f0f0"))
+                          margin=dict(l=0,r=0,t=10,b=0), xaxis=dict(showgrid=True, gridcolor="#E7ECF3"))
         fig.update_traces(textposition="outside")
         st.plotly_chart(fig, use_container_width=True)
     with col_b:
@@ -888,7 +912,7 @@ with tabs[1]:
                       color_discrete_sequence=[C_TEAL], labels={"n":"Auditorías",COL_TIPO_AUDITOR:""}, text="n")
         fig2.update_layout(height=260, plot_bgcolor="white", paper_bgcolor="white",
                            margin=dict(l=0,r=0,t=10,b=0),
-                           xaxis=dict(showgrid=True, gridcolor="#f0f0f0"))
+                           xaxis=dict(showgrid=True, gridcolor="#E7ECF3"))
         fig2.update_traces(textposition="outside")
         st.plotly_chart(fig2, use_container_width=True)
 
@@ -966,7 +990,7 @@ with tabs[2]:
                                text=[fmt_money(v) for v in linea_agg["cobrar"]], textposition="outside"))
         fig.update_layout(height=320, plot_bgcolor="white", paper_bgcolor="white",
                           margin=dict(l=0,r=80,t=10,b=0),
-                          xaxis=dict(tickprefix="$", showgrid=True, gridcolor="#f0f0f0"),
+                          xaxis=dict(tickprefix="$", showgrid=True, gridcolor="#E7ECF3"),
                           yaxis=dict(autorange="reversed"))
         st.plotly_chart(fig, use_container_width=True)
     with col_r:
@@ -977,7 +1001,7 @@ with tabs[2]:
                       labels={"score_prom":"Score Promedio",COL_LINEA:""}, text=ls["score_prom"].round(1))
         fig2.update_layout(height=320, plot_bgcolor="white", paper_bgcolor="white",
                            margin=dict(l=0,r=0,t=10,b=0), coloraxis_showscale=False,
-                           xaxis=dict(showgrid=True, gridcolor="#f0f0f0"))
+                           xaxis=dict(showgrid=True, gridcolor="#E7ECF3"))
         fig2.update_traces(textposition="outside")
         st.plotly_chart(fig2, use_container_width=True)
 
@@ -1073,7 +1097,7 @@ with tabs[4]:
         fig.update_layout(barmode="group", height=280, plot_bgcolor="white", paper_bgcolor="white",
                           legend=dict(orientation="h",y=-0.25), margin=dict(l=0,r=0,t=10,b=0),
                           xaxis=dict(showgrid=False, tickangle=-45),
-                          yaxis=dict(showgrid=True, gridcolor="#f0f0f0", tickprefix="$"))
+                          yaxis=dict(showgrid=True, gridcolor="#E7ECF3", tickprefix="$"))
         st.plotly_chart(fig, use_container_width=True)
     with col_c:
         titulo_seccion("Composición de Diferencias (Costo)")
@@ -1155,7 +1179,7 @@ with tabs[5]:
                      text=falt_sku["costo_total"].apply(fmt_money))
         fig.update_layout(height=380, plot_bgcolor="white", paper_bgcolor="white",
                           margin=dict(l=0,r=80,t=10,b=0), coloraxis_showscale=False,
-                          xaxis=dict(tickprefix="$",showgrid=True,gridcolor="#f0f0f0"),
+                          xaxis=dict(tickprefix="$",showgrid=True,gridcolor="#E7ECF3"),
                           yaxis=dict(autorange="reversed"))
         fig.update_traces(textposition="outside")
         st.plotly_chart(fig, use_container_width=True)
@@ -1167,7 +1191,7 @@ with tabs[5]:
         fig2 = px.bar(tipo_agg, x="n", y="TIPO_NORM", orientation="h",
                       color_discrete_sequence=[C_BLUE], labels={"n":"Cantidad","TIPO_NORM":""}, text="n")
         fig2.update_layout(height=280, plot_bgcolor="white", paper_bgcolor="white",
-                           margin=dict(l=0,r=0,t=10,b=0), xaxis=dict(showgrid=True,gridcolor="#f0f0f0"),
+                           margin=dict(l=0,r=0,t=10,b=0), xaxis=dict(showgrid=True,gridcolor="#E7ECF3"),
                            yaxis=dict(autorange="reversed"))
         fig2.update_traces(textposition="outside")
         st.plotly_chart(fig2, use_container_width=True)
@@ -1357,7 +1381,7 @@ with tabs[7]:
     fig1.update_layout(barmode="group", height=320, plot_bgcolor="white", paper_bgcolor="white",
                        legend=dict(orientation="h",y=-0.2), margin=dict(l=0,r=0,t=20,b=0),
                        xaxis=dict(showgrid=False, tickangle=-45),
-                       yaxis=dict(showgrid=True,gridcolor="#f0f0f0",tickprefix="$"))
+                       yaxis=dict(showgrid=True,gridcolor="#E7ECF3",tickprefix="$"))
     st.plotly_chart(fig1, use_container_width=True)
 
     col_l, col_r = st.columns(2)
@@ -1368,7 +1392,7 @@ with tabs[7]:
                      text=mes_agg["auditorias"], textposition="outside")
         fig2.update_layout(height=260, plot_bgcolor="white", paper_bgcolor="white",
                            margin=dict(l=0,r=0,t=20,b=0), xaxis=dict(showgrid=False),
-                           yaxis=dict(showgrid=True,gridcolor="#f0f0f0"))
+                           yaxis=dict(showgrid=True,gridcolor="#E7ECF3"))
         st.plotly_chart(fig2, use_container_width=True)
     with col_r:
         titulo_seccion("Score de Riesgo Promedio")
@@ -1378,7 +1402,7 @@ with tabs[7]:
                      text=mes_agg["score_prom"].round(1), textposition="outside")
         fig3.update_layout(height=260, plot_bgcolor="white", paper_bgcolor="white",
                            margin=dict(l=0,r=0,t=20,b=0), xaxis=dict(showgrid=False),
-                           yaxis=dict(showgrid=True,gridcolor="#f0f0f0",
+                           yaxis=dict(showgrid=True,gridcolor="#E7ECF3",
                                       range=[0, mes_agg["score_prom"].max()*1.3]))
         st.plotly_chart(fig3, use_container_width=True)
 
@@ -1392,7 +1416,7 @@ with tabs[7]:
                    color_discrete_sequence=[C_RED,C_BLUE,C_GREEN,C_AMBER,C_TEAL,C_PURPLE,"#D85A30","#888780","#D4537E"])
     fig4.update_layout(height=300, plot_bgcolor="white", paper_bgcolor="white",
                        margin=dict(l=0,r=0,t=20,b=0), legend=dict(orientation="h",y=-0.25),
-                       xaxis=dict(showgrid=False), yaxis=dict(showgrid=True,gridcolor="#f0f0f0",tickprefix="$"))
+                       xaxis=dict(showgrid=False), yaxis=dict(showgrid=True,gridcolor="#E7ECF3",tickprefix="$"))
     fig4.update_traces(line=dict(width=2), marker=dict(size=7))
     st.plotly_chart(fig4, use_container_width=True)
 
@@ -1427,7 +1451,7 @@ with tabs[7]:
         fig_yoy.update_layout(height=300, plot_bgcolor="white", paper_bgcolor="white",
                               margin=dict(l=0,r=0,t=10,b=0), legend=dict(orientation="h", y=-0.2),
                               xaxis=dict(showgrid=False),
-                              yaxis=dict(showgrid=True, gridcolor="#f0f0f0", tickprefix="$"))
+                              yaxis=dict(showgrid=True, gridcolor="#E7ECF3", tickprefix="$"))
         st.plotly_chart(fig_yoy, use_container_width=True)
 
         anio_actual_yoy, anio_anterior_yoy = anios_disp[-1], anios_disp[-2]
@@ -1549,7 +1573,7 @@ with tabs[8]:
                                       text=[fmt_money(v) for v in aging_agg["monto"]], textposition="outside"))
             fig_ag.update_layout(height=260, plot_bgcolor="white", paper_bgcolor="white",
                                  margin=dict(l=0,r=0,t=10,b=0),
-                                 yaxis=dict(tickprefix="$", showgrid=True, gridcolor="#f0f0f0"))
+                                 yaxis=dict(tickprefix="$", showgrid=True, gridcolor="#E7ECF3"))
             st.plotly_chart(fig_ag, use_container_width=True)
         with col_ag2:
             tabla_aging = aging_agg.reset_index().rename(
@@ -1610,7 +1634,7 @@ with tabs[8]:
             fig_zona.update_layout(
                 height=280, plot_bgcolor="white", paper_bgcolor="white",
                 margin=dict(l=0,r=160,t=10,b=0),
-                xaxis=dict(tickprefix="$", showgrid=True, gridcolor="#f0f0f0"),
+                xaxis=dict(tickprefix="$", showgrid=True, gridcolor="#E7ECF3"),
             )
             st.plotly_chart(fig_zona, use_container_width=True)
 
@@ -1645,7 +1669,7 @@ with tabs[8]:
         fig_est.update_layout(
             height=280, plot_bgcolor="white", paper_bgcolor="white",
             margin=dict(l=0,r=40,t=10,b=0),
-            xaxis=dict(showgrid=True, gridcolor="#f0f0f0"),
+            xaxis=dict(showgrid=True, gridcolor="#E7ECF3"),
             yaxis=dict(autorange="reversed")
         )
         st.plotly_chart(fig_est, use_container_width=True)
@@ -1694,7 +1718,7 @@ with tabs[8]:
             margin=dict(l=0,r=0,t=10,b=0),
             legend=dict(orientation="h", y=-0.25),
             xaxis=dict(showgrid=False),
-            yaxis=dict(showgrid=True, gridcolor="#f0f0f0")
+            yaxis=dict(showgrid=True, gridcolor="#E7ECF3")
         )
         st.plotly_chart(fig_aj, use_container_width=True)
 
@@ -1718,7 +1742,7 @@ with tabs[8]:
             margin=dict(l=0,r=0,t=10,b=0),
             legend=dict(orientation="h", y=-0.25),
             xaxis=dict(showgrid=False),
-            yaxis=dict(showgrid=True, gridcolor="#f0f0f0", tickprefix="$")
+            yaxis=dict(showgrid=True, gridcolor="#E7ECF3", tickprefix="$")
         )
         st.plotly_chart(fig_mc, use_container_width=True)
 
@@ -1863,7 +1887,7 @@ with tabs[9]:
     fig_kpi.add_vline(x=CUMPLIMIENTO_UMBRAL_VERDE, line_dash="dash", line_color=C_GREEN, opacity=0.5)
     fig_kpi.update_layout(height=max(260, 28*len(graf_df)), plot_bgcolor="white", paper_bgcolor="white",
                           margin=dict(l=0,r=60,t=10,b=0),
-                          xaxis=dict(title="% Cumplimiento", showgrid=True, gridcolor="#f0f0f0"))
+                          xaxis=dict(title="% Cumplimiento", showgrid=True, gridcolor="#E7ECF3"))
     st.plotly_chart(fig_kpi, use_container_width=True)
     st.caption("Barras grises = auditores tipo Coral / sin clasificar, sin meta definida para esta evaluación. Línea punteada = umbral de 90% (verde).")
 
